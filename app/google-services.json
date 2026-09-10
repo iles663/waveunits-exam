@@ -1,12 +1,35 @@
 {
   "project_info": {
-    "project_number": "YOUR_PROJECT_NUMBER",
-    "project_id": "YOUR_PROJECT_ID"
+    "project_number": "705925410232",
+    "project_id": "waveunits-1bed5",
+    "storage_bucket": "waveunits-1bed5.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "YOUR_APP_ID",
+        "mobilesdk_app_id": "1:705925410232:android:994577b597b1d3e189734d",
+        "android_client_info": {
+          "package_name": "com.waveunits.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDmK3Cv3cs9gwqa8mhXqT85C_VIT82gxx4"
+        },
+        {
+          "current_key": "AIzaSyDob10wLDqy2VMI2yoJn3LQJ0LDygdrCqo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:705925410232:android:5e977973aa33eea189734d",
         "android_client_info": {
           "package_name": "com.waveunits.docs"
         }
@@ -14,7 +37,32 @@
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "YOUR_API_KEY"
+          "current_key": "AIzaSyDmK3Cv3cs9gwqa8mhXqT85C_VIT82gxx4"
+        },
+        {
+          "current_key": "AIzaSyDob10wLDqy2VMI2yoJn3LQJ0LDygdrCqo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:705925410232:android:3c06d08c5b8205c289734d",
+        "android_client_info": {
+          "package_name": "com.waveunits.marker"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDmK3Cv3cs9gwqa8mhXqT85C_VIT82gxx4"
+        },
+        {
+          "current_key": "AIzaSyDob10wLDqy2VMI2yoJn3LQJ0LDygdrCqo"
         }
       ],
       "services": {
