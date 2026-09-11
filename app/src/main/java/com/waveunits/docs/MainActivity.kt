@@ -276,10 +276,7 @@ fun generateActionableInsights(
     return insights
 }
 
-fun generateTrends(
-    current: List<ClassTopicPerformance>,
-    previous: List<ClassTopicPerformance>
-): List<TrendData> {
+fun generateTrends(current: List<ClassTopicPerformance>, previous: List<ClassTopicPerformance>): List<TrendData> {
     val trends = mutableListOf<TrendData>()
     for (c in current) {
         val p = previous.find { it.topic == c.topic } ?: continue
@@ -361,42 +358,26 @@ fun generateAnswerSheetTemplate(questionCount: Int): String {
     return sb.toString()
 }
 
-// ===== AI: STAGE 1 — TRANSCRIBE ANSWER SHEET (COLUMNS PRESERVED) =====
+// ===== AI: STAGE 1 — TRANSCRIBE ANSWER SHEET (fixed to match question-paper recipe) =====
 private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     return withContext(Dispatchers.IO) {
         try {
-            val isr = context.contentResolver.openInputStream(uri) ?: return@withContext ""
+            val isr = context.contentResolver.openInputStream(uri) ?: return@withContext "ERR: cannot open image"
             val bmp = BitmapFactory.decodeStream(isr)
             isr.close()
-            val scaled = Bitmap.createScaledBitmap(bmp, 1400, 2000, true)
+            // Match the working question-paper recipe: 800x1200, quality 50
+            val scaled = Bitmap.createScaledBitmap(bmp, 800, 1200, true)
             val baos = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 90, baos)
+            scaled.compress(Bitmap.CompressFormat.JPEG, 50, baos)
             val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
 
             val client = OkHttpClient.Builder()
                 .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(180, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
 
-            val prompt = """
-                Transcribe the image accurately. Give a print text of everything in the image.
-                Do not add. Do not remove. Do not summarise.
-
-                RULES:
-                1. Keep the exact table structure with all columns and all rows.
-                2. Do NOT drop any column, even if it looks empty or irrelevant.
-                3. Print the header row exactly as it appears (e.g. D | NO. | A | B | C | D).
-                4. For every row, print the row number and then one bracket cell per column.
-                5. Inside each bracket, print exactly what is visible:
-                     - letter written           ? [ A ]
-                     - empty bracket            ? [   ]
-                     - line drawn through it    ? [---]
-                     - unreadable               ? [ ? ]
-                     - tick / scribble inside   ? [ * ]
-                6. Print instructions and footer text exactly as they appear.
-                7. Use a fixed-width plain-text layout so columns line up vertically.
-                8. Output only the printout. No commentary.
-            """.trimIndent()
+            // Short prompt — same shape as the working question-paper prompt
+            val prompt = "Transcribe everything in the image word for word as plain text. Keep the table layout, all columns, all rows. Do not add. Do not remove. Do not summarise."
 
             val content = JSONArray()
                 .put(JSONObject().put("type", "text").put("text", prompt))
@@ -407,7 +388,6 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
                 .put("model", "gpt-5.6-luna")
                 .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
                 .put("max_completion_tokens", 4000)
-                .put("temperature", 0.0)
                 .toString()
 
             val req = Request.Builder()
@@ -417,12 +397,18 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
                 .build()
 
             client.newCall(req).execute().use { res ->
-                val js = res.body?.string() ?: return@use ""
-                if (!res.isSuccessful) return@use ""
-                JSONObject(js).getJSONArray("choices").getJSONObject(0)
-                    .getJSONObject("message").getString("content").trim()
+                val js = res.body?.string() ?: return@use "ERR: empty response body"
+                if (!res.isSuccessful) return@use "ERR HTTP ${res.code}: ${js.take(400)}"
+                try {
+                    JSONObject(js).getJSONArray("choices").getJSONObject(0)
+                        .getJSONObject("message").getString("content").trim()
+                } catch (e: Exception) {
+                    "ERR parse: ${e.message} | raw: ${js.take(400)}"
+                }
             }
-        } catch (e: Exception) { "" }
+        } catch (e: Exception) {
+            "ERR exception: ${e.message}"
+        }
     }
 }
 
@@ -477,17 +463,20 @@ private suspend fun extractAnswersByRowColumn(printout: String, answerKeySize: I
             val result = mutableMapOf<Int, String>()
             client.newCall(req).execute().use { res ->
                 val js = res.body?.string() ?: return@use
-                val txt = JSONObject(js).getJSONArray("choices").getJSONObject(0)
-                    .getJSONObject("message").getString("content")
-                var clean = txt.replace("```json", "").replace("```", "").trim()
-                val s = clean.indexOf('{'); val e = clean.lastIndexOf('}')
-                if (s >= 0 && e > s) clean = clean.substring(s, e + 1)
-                val arr = JSONObject(clean).getJSONObject("answers")
-                arr.keys().forEach { k ->
-                    val qn = k.toIntOrNull() ?: return@forEach
-                    val v = arr.getString(k).uppercase().take(1)
-                    if (v in listOf("A", "B", "C", "D")) result[qn] = v
-                }
+                if (!res.isSuccessful) return@use
+                try {
+                    val txt = JSONObject(js).getJSONArray("choices").getJSONObject(0)
+                        .getJSONObject("message").getString("content")
+                    var clean = txt.replace("```json", "").replace("```", "").trim()
+                    val s = clean.indexOf('{'); val e = clean.lastIndexOf('}')
+                    if (s >= 0 && e > s) clean = clean.substring(s, e + 1)
+                    val arr = JSONObject(clean).getJSONObject("answers")
+                    arr.keys().forEach { k ->
+                        val qn = k.toIntOrNull() ?: return@forEach
+                        val v = arr.getString(k).uppercase().take(1)
+                        if (v in listOf("A", "B", "C", "D")) result[qn] = v
+                    }
+                } catch (e: Exception) { }
             }
             result
         } catch (e: Exception) { emptyMap() }
@@ -621,6 +610,7 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
                 .build()
             client.newCall(req).execute().use { res ->
                 val js = res.body?.string() ?: return@use emptyList()
+                if (!res.isSuccessful) return@use emptyList()
                 val text = JSONObject(js).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
                 var clean = text.replace("```json", "").replace("```", "").trim()
                 val s = clean.indexOf('['); val e = clean.lastIndexOf(']')
@@ -877,7 +867,7 @@ fun WaveUnitsApp() {
 
     fun saveRosterTemplate(templateName: String, names: List<String>) {
         if (templateName.isBlank() || names.isEmpty()) {
-            Toast.makeText(context, "? Enter name and names", Toast.LENGTH_SHORT).show(); return
+            Toast.makeText(context, "Enter name and names", Toast.LENGTH_SHORT).show(); return
         }
         scope.launch {
             try {
@@ -886,10 +876,10 @@ fun WaveUnitsApp() {
                     "name" to templateName, "names" to names,
                     "createdAt" to System.currentTimeMillis()
                 ))
-                Toast.makeText(context, "? Saved '$templateName'", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Saved '$templateName'", Toast.LENGTH_SHORT).show()
                 loadSavedRosters()
             } catch (e: Exception) {
-                Toast.makeText(context, "? ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -898,10 +888,10 @@ fun WaveUnitsApp() {
         scope.launch {
             try {
                 db.collection("rosterTemplates").document(templateId).delete()
-                Toast.makeText(context, "??? Deleted", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Deleted", Toast.LENGTH_SHORT).show()
                 loadSavedRosters()
             } catch (e: Exception) {
-                Toast.makeText(context, "? ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -1050,7 +1040,7 @@ fun WaveUnitsApp() {
                 }
                 val answerKeyMap = parseAnswerKeyToMap(answerKey)
                 if (answerKeyMap.isEmpty()) {
-                    Toast.makeText(context, "? No answer key", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "No answer key", Toast.LENGTH_LONG).show()
                     isGrading = false; return@launch
                 }
 
@@ -1060,8 +1050,11 @@ fun WaveUnitsApp() {
 
                 for (sheet in collectedStudentAnswerSheets) {
                     if (sheet.studentName.isBlank() || sheet.studentName == "Unknown") continue
+                    if (sheet.extractedText.startsWith("ERR")) {
+                        Toast.makeText(context, "Skipping ${sheet.studentName}: ${sheet.extractedText.take(120)}", Toast.LENGTH_LONG).show()
+                        continue
+                    }
 
-                    // STAGE 2: read answers from the PRINTED transcription by row+column
                     val studentAnswers = extractAnswersByRowColumn(sheet.extractedText, maxQ)
 
                     val allQ = (answerKeyMap.keys + studentAnswers.keys).toSortedSet()
@@ -1117,7 +1110,7 @@ fun WaveUnitsApp() {
                 }
 
                 if (results.isEmpty()) {
-                    Toast.makeText(context, "? No valid students", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "No valid students", Toast.LENGTH_LONG).show()
                     isGrading = false; return@launch
                 }
                 db.collection("exams").document(currentProjectId).update("status", "graded")
@@ -1126,9 +1119,9 @@ fun WaveUnitsApp() {
                 loadAdvancedAnalytics()
                 showMarkingResults = true
                 markedAnswerSheets = marked
-                Toast.makeText(context, "? Graded ${results.size}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Graded ${results.size}", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
-                Toast.makeText(context, "? ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "${e.message}", Toast.LENGTH_LONG).show()
                 isGrading = false
             }
         }
@@ -1248,9 +1241,9 @@ fun WaveUnitsApp() {
             if (!dir.exists()) dir.mkdirs()
             val file = File(dir, "WaveUnits_Report_${System.currentTimeMillis()}.txt")
             FileWriter(file).use { it.write(text) }
-            Toast.makeText(context, "? Saved: ${file.name}", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "Saved: ${file.name}", Toast.LENGTH_LONG).show()
         } catch (e: Exception) {
-            Toast.makeText(context, "? ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -1271,9 +1264,9 @@ fun WaveUnitsApp() {
             if (!dir.exists()) dir.mkdirs()
             val file = File(dir, "WaveUnits_AnswerSheet_${System.currentTimeMillis()}.txt")
             FileWriter(file).use { it.write(text) }
-            Toast.makeText(context, "? Saved: ${file.name}", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "Saved: ${file.name}", Toast.LENGTH_LONG).show()
         } catch (e: Exception) {
-            Toast.makeText(context, "? ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -1320,7 +1313,7 @@ fun WaveUnitsApp() {
                                 "extractedTextSaved" to false,
                                 "answerSheetGenerated" to true,
                                 "markingMode" to "ai"))
-                            progressText = "? Extracted ${allQs.size}. Total: ${newQs.size}."
+                            progressText = "Extracted ${allQs.size}. Total: ${newQs.size}."
                             isExtracting = false
                             loadProjects(); loadExamData(currentProjectId); scanPhase = ""
                         }
@@ -1336,18 +1329,25 @@ fun WaveUnitsApp() {
                                 "manualAnswerSheet" to manualAnswerSheetText,
                                 "manualAnswerKey" to manualAnswerKey,
                                 "answerKey" to manualAnswerKey, "markingMode" to "manual"))
-                            progressText = "? Manual sheet extracted!"
+                            progressText = "Manual sheet extracted!"
                             loadProjects(); loadExamData(currentProjectId); scanPhase = ""
                         }
                         "answer_sheets" -> {
                             isExtracting = true
                             val newSheets = mutableListOf<StudentAnswerSheetData>()
                             for ((idx, uri) in uris.withIndex()) {
-                                progressText = "??? Transcribing page ${idx + 1} of ${uris.size}..."
+                                progressText = "Transcribing page ${idx + 1} of ${uris.size}..."
 
-                                // ? STAGE 1: transcribe (columns preserved)
                                 val printout = transcribeAnswerSheet(context, uri)
                                 val imgB64 = imageToBase64(context, uri)
+
+                                if (printout.isBlank() || printout.startsWith("ERR")) {
+                                    Toast.makeText(
+                                        context,
+                                        "Transcribe failed: ${printout.take(200)}",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
 
                                 val studentName = when {
                                     isRosterMode && rosterNames.isNotEmpty() -> {
@@ -1375,7 +1375,7 @@ fun WaveUnitsApp() {
                             collectedStudentAnswerSheets = newCollected
                             manualStudentName = ""
                             isExtracting = false
-                            progressText = "? Transcribed ${newSheets.size}. Total: ${newCollected.size}."
+                            progressText = "Transcribed ${newSheets.size}. Total: ${newCollected.size}."
                             loadProjects(); loadExamData(currentProjectId); scanPhase = ""
                         }
                     }
@@ -1417,7 +1417,6 @@ fun WaveUnitsApp() {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    Text("??", fontSize = 48.sp)
                     Text("WaveUnits", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                     Spacer(modifier = Modifier.height(32.dp))
                     OutlinedTextField(value = email, onValueChange = { email = it },
@@ -1471,12 +1470,12 @@ fun WaveUnitsApp() {
             Scaffold(
                 topBar = {
                     TopAppBar(
-                        title = { Text("?? WaveUnits", fontWeight = FontWeight.Bold) },
+                        title = { Text("WaveUnits", fontWeight = FontWeight.Bold) },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1e293b)),
                         actions = {
                             IconButton(onClick = {
                                 auth.signOut(); isLoggedIn = false; saveLoginState(false)
-                            }) { Text("??", fontSize = 20.sp) }
+                            }) { Text("Exit", fontSize = 14.sp) }
                         }
                     )
                 }
@@ -1496,7 +1495,6 @@ fun WaveUnitsApp() {
                             if (projects.isEmpty()) {
                                 Column(modifier = Modifier.fillMaxWidth().padding(32.dp),
                                     horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text("??", fontSize = 48.sp)
                                     Text("No exams yet", color = Color(0xFF94a3b8))
                                 }
                             } else {
@@ -1598,7 +1596,7 @@ fun WaveUnitsApp() {
                                             },
                                             modifier = Modifier.fillMaxWidth(),
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                        ) { Text("?? Data Dashboard") }
+                                        ) { Text("Data Dashboard") }
                                         Spacer(modifier = Modifier.height(8.dp))
 
                                         if (collectedStudentAnswerSheets.isNotEmpty()) {
@@ -1606,7 +1604,7 @@ fun WaveUnitsApp() {
                                                 onClick = { gradeCollectedSheets() },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                            ) { Text(if (isGrading) "? Grading..." else "?? Grade Collected Sheets (${collectedStudentAnswerSheets.size})") }
+                                            ) { Text(if (isGrading) "Grading..." else "Grade Collected Sheets (${collectedStudentAnswerSheets.size})") }
                                             Spacer(modifier = Modifier.height(8.dp))
                                         }
                                         if (markedAnswerSheets.isNotEmpty()) {
@@ -1614,7 +1612,7 @@ fun WaveUnitsApp() {
                                                 onClick = { sectionState = sectionState.copy(isMarkedSheetsOpen = true) },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                            ) { Text("?? Marked Sheets (${markedAnswerSheets.size})") }
+                                            ) { Text("Marked Sheets (${markedAnswerSheets.size})") }
                                             Spacer(modifier = Modifier.height(8.dp))
                                         }
                                         Button(
@@ -1625,7 +1623,7 @@ fun WaveUnitsApp() {
                                             },
                                             modifier = Modifier.fillMaxWidth(),
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                        ) { Text("?? View Analytics") }
+                                        ) { Text("View Analytics") }
                                         Spacer(modifier = Modifier.height(16.dp))
 
                                         if (isExtracting) {
@@ -1646,43 +1644,43 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { sectionState = sectionState.copy(isRosterSetupOpen = true) },
                                                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                                ) { Text("?? Set Up Class Roster") }
+                                                ) { Text("Set Up Class Roster") }
                                             }
                                             item {
                                                 Button(onClick = { sectionState = sectionState.copy(isSavedRostersOpen = true); loadSavedRosters() },
                                                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("?? Saved Rosters (${savedRosters.size})") }
+                                                ) { Text("Saved Rosters (${savedRosters.size})") }
                                             }
                                             item {
                                                 Button(onClick = { sectionState = sectionState.copy(isAnswerSheetGeneratorOpen = true) },
                                                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("??? Generate Answer Sheet") }
+                                                ) { Text("Generate Answer Sheet") }
                                             }
                                             item {
                                                 Button(onClick = { sectionState = sectionState.copy(isQuestionPaperOpen = true) },
                                                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                                ) { Text("?? Question Paper") }
+                                                ) { Text("Question Paper") }
                                             }
                                             item {
                                                 Button(onClick = { sectionState = sectionState.copy(isAIAnswerSheetOpen = true) },
                                                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("?? AI Answer Sheet") }
+                                                ) { Text("AI Answer Sheet") }
                                             }
                                             item {
                                                 Button(onClick = { sectionState = sectionState.copy(isManualAnswerSheetOpen = true) },
                                                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                                ) { Text("?? Manual Answer Sheet") }
+                                                ) { Text("Manual Answer Sheet") }
                                             }
                                             item {
                                                 Button(onClick = { sectionState = sectionState.copy(isCollectedSheetsOpen = true) },
                                                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("?? Collected Sheets (${collectedStudentAnswerSheets.size})") }
+                                                ) { Text("Collected Sheets (${collectedStudentAnswerSheets.size})") }
                                             }
                                             item {
                                                 Button(
@@ -1696,21 +1694,20 @@ fun WaveUnitsApp() {
                                                     },
                                                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
-                                                ) { Text("??? Delete Exam") }
+                                                ) { Text("Delete Exam") }
                                             }
                                         }
                                     }
 
-                                    // ===== Sub-views =====
                                     if (sectionState.isAnswerSheetGeneratorOpen) {
                                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                                             item {
                                                 Button(onClick = { sectionState = sectionState.copy(isAnswerSheetGeneratorOpen = false) },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("? Back") }
+                                                ) { Text("Back") }
                                                 Spacer(modifier = Modifier.height(8.dp))
-                                                Text("??? Generate Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                                Text("Generate Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 OutlinedTextField(value = answerSheetQuestionCount,
                                                     onValueChange = { answerSheetQuestionCount = it },
@@ -1725,7 +1722,7 @@ fun WaveUnitsApp() {
                                                     },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("?? Generate") }
+                                                ) { Text("Generate") }
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 if (generatedAnswerSheetText.isNotBlank()) {
                                                     Text("Preview:", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
@@ -1734,7 +1731,7 @@ fun WaveUnitsApp() {
                                                     Button(onClick = { saveAnswerSheetTemplate(generatedAnswerSheetText) },
                                                         modifier = Modifier.fillMaxWidth(),
                                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                                    ) { Text("??? Save to Downloads") }
+                                                    ) { Text("Save to Downloads") }
                                                 }
                                             }
                                         }
@@ -1746,9 +1743,9 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { sectionState = sectionState.copy(isRosterSetupOpen = false) },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("? Back") }
+                                                ) { Text("Back") }
                                                 Spacer(modifier = Modifier.height(8.dp))
-                                                Text("?? Class Roster", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                Text("Class Roster", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 OutlinedTextField(value = rosterInput, onValueChange = { rosterInput = it },
                                                     label = { Text("Names separated by commas") },
@@ -1791,9 +1788,9 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { sectionState = sectionState.copy(isSavedRostersOpen = false) },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("? Back") }
+                                                ) { Text("Back") }
                                                 Spacer(modifier = Modifier.height(8.dp))
-                                                Text("?? Saved Rosters", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                                Text("Saved Rosters", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 if (savedRosters.isEmpty()) {
                                                     Text("None yet.", color = Color(0xFF94a3b8))
@@ -1817,7 +1814,7 @@ fun WaveUnitsApp() {
                                                                         Spacer(modifier = Modifier.width(8.dp))
                                                                         Button(onClick = { deleteRosterTemplate(r.id) },
                                                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
-                                                                        ) { Text("???") }
+                                                                        ) { Text("X") }
                                                                     }
                                                                 }
                                                                 Text("${r.names.size} students", color = Color(0xFF94a3b8), fontSize = 12.sp)
@@ -1835,12 +1832,12 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { sectionState = sectionState.copy(isDashboardOpen = false) },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("? Back") }
+                                                ) { Text("Back") }
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                     Column(modifier = Modifier.padding(16.dp)) {
-                                                        Text("?? Ask AI", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                        Text("Ask AI", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                                                         Spacer(modifier = Modifier.height(8.dp))
                                                         OutlinedTextField(value = aiQuestion, onValueChange = { aiQuestion = it },
                                                             label = { Text("Your question...") },
@@ -1849,7 +1846,7 @@ fun WaveUnitsApp() {
                                                         Button(onClick = { askAIQuestion(aiQuestion) },
                                                             modifier = Modifier.fillMaxWidth(),
                                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                        ) { Text(if (isAIThinking) "?..." else "?? Ask") }
+                                                        ) { Text(if (isAIThinking) "Thinking..." else "Ask") }
                                                         if (aiAnswer.isNotBlank()) {
                                                             Spacer(modifier = Modifier.height(12.dp))
                                                             Card(modifier = Modifier.fillMaxWidth(),
@@ -1902,21 +1899,21 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { sectionState = sectionState.copy(isPrintableReportOpen = false) },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("? Back") }
+                                                ) { Text("Back") }
                                                 Spacer(modifier = Modifier.height(8.dp))
-                                                Text("?? Printable Report", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                                Text("Printable Report", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 Text(printableReportText, color = Color.White, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                                                 Spacer(modifier = Modifier.height(16.dp))
                                                 Button(onClick = { saveReportToDownloads(printableReportText) },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("??? Save to Downloads") }
+                                                ) { Text("Save to Downloads") }
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 Button(onClick = { shareReport(printableReportText) },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                                ) { Text("?? Share") }
+                                                ) { Text("Share") }
                                             }
                                         }
                                     } else if (sectionState.isMarkedSheetsOpen) {
@@ -1925,9 +1922,9 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { sectionState = sectionState.copy(isMarkedSheetsOpen = false) },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("? Back") }
+                                                ) { Text("Back") }
                                                 Spacer(modifier = Modifier.height(8.dp))
-                                                Text("?? Marked Sheets", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                                Text("Marked Sheets", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 Button(
                                                     onClick = {
@@ -1936,13 +1933,13 @@ fun WaveUnitsApp() {
                                                     },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                                ) { Text("??? Printable Report") }
+                                                ) { Text("Printable Report") }
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 markedAnswerSheets.forEach { sheet ->
                                                     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                         colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                         Column(modifier = Modifier.padding(16.dp)) {
-                                                            Text("?? ${sheet.studentName}", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                            Text("Student: ${sheet.studentName}", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                                                             Text("${sheet.score}/${sheet.total} (${"%.1f".format(sheet.percentage)}%) | ${getKenyanGrade(sheet.percentage)}",
                                                                 color = Color.White, fontSize = 16.sp)
                                                             Spacer(modifier = Modifier.height(8.dp))
@@ -1964,14 +1961,14 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { sectionState = sectionState.copy(isQuestionPaperOpen = false) },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("? Back") }
+                                                ) { Text("Back") }
                                                 Spacer(modifier = Modifier.height(8.dp))
-                                                Text("?? Question Paper", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                Text("Question Paper", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 Button(onClick = { launchScan("question_paper") },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                                ) { Text("? Add Question Paper") }
+                                                ) { Text("Add Question Paper") }
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 if (questionPaperText.isNotBlank()) {
                                                     Text("Extracted Text:", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
@@ -1981,7 +1978,7 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { saveQuestionPaperText() },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("?? Save") }
+                                                ) { Text("Save") }
                                             }
                                         }
                                     } else if (sectionState.isAIAnswerSheetOpen) {
@@ -1990,12 +1987,12 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { sectionState = sectionState.copy(isAIAnswerSheetOpen = false) },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("? Back") }
+                                                ) { Text("Back") }
                                                 Spacer(modifier = Modifier.height(8.dp))
-                                                Text("?? AI Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                                Text("AI Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 if (simplifiedAnswerKey.isNotBlank()) {
-                                                    Text("?? Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                                    Text("Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
                                                     Text(simplifiedAnswerKey, color = Color.White, fontSize = 12.sp)
                                                 }
                                                 if (aiAnswerSheet.isNotBlank()) {
@@ -2007,7 +2004,7 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { saveAIAnswerSheetText() },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("?? Save") }
+                                                ) { Text("Save") }
                                             }
                                         }
                                     } else if (sectionState.isManualAnswerSheetOpen) {
@@ -2016,17 +2013,17 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { sectionState = sectionState.copy(isManualAnswerSheetOpen = false) },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("? Back") }
+                                                ) { Text("Back") }
                                                 Spacer(modifier = Modifier.height(8.dp))
-                                                Text("?? Manual Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                                Text("Manual Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 Button(onClick = { launchScan("manual_answer_sheet") },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                                ) { Text("? Add") }
+                                                ) { Text("Add") }
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 if (manualAnswerKey.isNotBlank()) {
-                                                    Text("?? Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                                    Text("Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
                                                     Text(manualAnswerKey, color = Color.White, fontSize = 12.sp)
                                                 }
                                                 if (manualAnswerSheetText.isNotBlank()) {
@@ -2038,7 +2035,7 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { saveManualAnswerSheetText() },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                                ) { Text("?? Save") }
+                                                ) { Text("Save") }
                                             }
                                         }
                                     } else if (sectionState.isCollectedSheetsOpen) {
@@ -2047,9 +2044,9 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { sectionState = sectionState.copy(isCollectedSheetsOpen = false) },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("? Back") }
+                                                ) { Text("Back") }
                                                 Spacer(modifier = Modifier.height(8.dp))
-                                                Text("?? Collected Sheets (${collectedStudentAnswerSheets.size})",
+                                                Text("Collected Sheets (${collectedStudentAnswerSheets.size})",
                                                     fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 OutlinedTextField(value = manualStudentName, onValueChange = { manualStudentName = it },
@@ -2058,14 +2055,14 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { launchScan("answer_sheets") },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("? Add Answer Sheets") }
+                                                ) { Text("Add Answer Sheets") }
                                                 Spacer(modifier = Modifier.height(8.dp))
                                             }
                                             items(collectedStudentAnswerSheets) { sheet ->
                                                 Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                                                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                     Column(modifier = Modifier.padding(16.dp)) {
-                                                        Text("?? ${sheet.studentName}", fontWeight = FontWeight.Bold,
+                                                        Text("Student: ${sheet.studentName}", fontWeight = FontWeight.Bold,
                                                             color = Color(0xFF60a5fa), fontSize = 16.sp)
                                                         Spacer(modifier = Modifier.height(8.dp))
                                                         val bmp = remember(sheet.image) { decodeBase64(sheet.image) }
@@ -2074,13 +2071,13 @@ fun WaveUnitsApp() {
                                                                 modifier = Modifier.fillMaxWidth().height(250.dp))
                                                         }
                                                         Spacer(modifier = Modifier.height(8.dp))
-                                                        Text("??? Printout (source of truth):",
+                                                        Text("Printout (source of truth):",
                                                             fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b), fontSize = 12.sp)
                                                         Card(modifier = Modifier.fillMaxWidth(),
                                                             colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
                                                             Text(
                                                                 text = sheet.extractedText.ifBlank { "[No printout]" },
-                                                                color = Color(0xFF10b981),
+                                                                color = if (sheet.extractedText.startsWith("ERR")) Color(0xFFef4444) else Color(0xFF10b981),
                                                                 fontSize = 9.sp,
                                                                 fontFamily = FontFamily.Monospace,
                                                                 modifier = Modifier.padding(8.dp)
@@ -2102,7 +2099,7 @@ fun WaveUnitsApp() {
                                                             },
                                                             modifier = Modifier.fillMaxWidth(),
                                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                                        ) { Text("??? Save Printout") }
+                                                        ) { Text("Save Printout") }
                                                     }
                                                 }
                                             }
@@ -2111,7 +2108,7 @@ fun WaveUnitsApp() {
                                                 Button(onClick = { saveCollectedSheets() },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("?? Save Collected") }
+                                                ) { Text("Save Collected") }
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 Button(
                                                     onClick = {
@@ -2126,7 +2123,7 @@ fun WaveUnitsApp() {
                                                     },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
-                                                ) { Text("??? Delete All") }
+                                                ) { Text("Delete All") }
                                             }
                                         }
                                     }
@@ -2144,7 +2141,7 @@ fun WaveUnitsApp() {
                                     Row(modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically) {
-                                        Text("?? ${s.name}", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                        Text("Student: ${s.name}", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                         Button(onClick = { selectedStudent = null },
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
                                         ) { Text("Back") }
@@ -2154,7 +2151,7 @@ fun WaveUnitsApp() {
                                             Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                 colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                 Column(modifier = Modifier.padding(16.dp)) {
-                                                    Text("?? Overview", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                    Text("Overview", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                                                     Text("Average: ${"%.1f".format(s.averageScore)}%", color = Color.White)
                                                     Text("Grade: ${s.grade}", color = Color.White)
                                                     Text("Rank: #${s.rank}", color = Color.White)
@@ -2164,15 +2161,15 @@ fun WaveUnitsApp() {
                                             Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                 colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                 Column(modifier = Modifier.padding(16.dp)) {
-                                                    Text("?? Strong", fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
-                                                    s.strongTopics.forEach { Text("• $it", color = Color.White) }
+                                                    Text("Strong", fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                                    s.strongTopics.forEach { Text("- $it", color = Color.White) }
                                                 }
                                             }
                                             Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                 colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                 Column(modifier = Modifier.padding(16.dp)) {
-                                                    Text("?? Weak", fontWeight = FontWeight.Bold, color = Color(0xFFef4444))
-                                                    s.weakTopics.forEach { Text("• $it", color = Color.White) }
+                                                    Text("Weak", fontWeight = FontWeight.Bold, color = Color(0xFFef4444))
+                                                    s.weakTopics.forEach { Text("- $it", color = Color.White) }
                                                 }
                                             }
                                         }
@@ -2183,7 +2180,7 @@ fun WaveUnitsApp() {
                                     Row(modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically) {
-                                        Text("?? Analytics", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                        Text("Analytics", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                         Button(onClick = { currentView = "projectDetail" },
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
                                         ) { Text("Back") }
@@ -2198,9 +2195,9 @@ fun WaveUnitsApp() {
                                                     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                         colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                         Column(modifier = Modifier.padding(16.dp)) {
-                                                            Text("?? Insights", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                                            Text("Insights", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                                             a.actionableInsights.forEach {
-                                                                Text("• ${it.message}", color = when (it.type) {
+                                                                Text("- ${it.message}", color = when (it.type) {
                                                                     "RETEACH" -> Color(0xFFef4444); "FOCUS" -> Color(0xFFf59e0b)
                                                                     "STRONG" -> Color(0xFF10b981); else -> Color.White
                                                                 }, fontSize = 12.sp)
@@ -2214,7 +2211,7 @@ fun WaveUnitsApp() {
                                                     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                         colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                         Column(modifier = Modifier.padding(16.dp)) {
-                                                            Text("?? Trends", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                            Text("Trends", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                                                             a.trends.forEach { t ->
                                                                 val txt = if (t.change > 0) "+${"%.1f".format(t.change)}%" else "${"%.1f".format(t.change)}%"
                                                                 Text("${t.topic}: $txt (from ${"%.1f".format(t.previousScore)}% to ${"%.1f".format(t.currentScore)}%)",
@@ -2229,7 +2226,7 @@ fun WaveUnitsApp() {
                                                     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                         colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                         Column(modifier = Modifier.padding(16.dp)) {
-                                                            Text("?? Comparison", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                                            Text("Comparison", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
                                                             a.studentComparisons.forEach { c ->
                                                                 Text("${c.studentA} is ${"%.1f".format(c.scoreDifference)}% ahead of ${c.studentB}",
                                                                     color = Color.White, fontSize = 12.sp)
@@ -2242,7 +2239,7 @@ fun WaveUnitsApp() {
                                                 Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                     Column(modifier = Modifier.padding(16.dp)) {
-                                                        Text("?? Topic Analysis", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                        Text("Topic Analysis", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                                                         a.classTopicPerformance.forEach { t ->
                                                             Text("${t.topic}: ${"%.1f".format(t.averageScore)}% (${t.correctAnswers}/${t.questionsAttempted})",
                                                                 color = if (t.averageScore >= 80) Color(0xFF10b981) else if (t.averageScore >= 50) Color(0xFFf59e0b) else Color(0xFFef4444),
@@ -2255,7 +2252,7 @@ fun WaveUnitsApp() {
                                                 Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                     Column(modifier = Modifier.padding(16.dp)) {
-                                                        Text("?? Distribution", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                        Text("Distribution", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                                                         Text("A: ${a.scoreDistribution.gradeA}", color = Color(0xFF10b981))
                                                         Text("A-: ${a.scoreDistribution.gradeAMinus}", color = Color(0xFF10b981))
                                                         Text("B+: ${a.scoreDistribution.gradeBPlus}", color = Color(0xFF60a5fa))
@@ -2275,7 +2272,7 @@ fun WaveUnitsApp() {
                                                 Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                     Column(modifier = Modifier.padding(16.dp)) {
-                                                        Text("?? Question Analysis", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                        Text("Question Analysis", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                                                         a.questionBreakdown.forEach { q ->
                                                             Text("Q${q.questionNumber} (${q.topic}): ${q.correctCount}/${q.totalCount} [${q.difficulty}]",
                                                                 color = when (q.difficulty) {
@@ -2286,7 +2283,7 @@ fun WaveUnitsApp() {
                                                 }
                                             }
                                             item {
-                                                Text("?? Leaderboard", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                                Text("Leaderboard", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                                 Spacer(modifier = Modifier.height(8.dp))
                                             }
                                             items(a.studentLeaderboard) { s ->
