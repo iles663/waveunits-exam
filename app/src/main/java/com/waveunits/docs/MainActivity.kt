@@ -358,14 +358,13 @@ fun generateAnswerSheetTemplate(questionCount: Int): String {
     return sb.toString()
 }
 
-// ===== AI: STAGE 1 — TRANSCRIBE ANSWER SHEET (fixed to match question-paper recipe) =====
+// ===== AI: STAGE 1 — TRANSCRIBE ANSWER SHEET =====
 private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     return withContext(Dispatchers.IO) {
         try {
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext "ERR: cannot open image"
             val bmp = BitmapFactory.decodeStream(isr)
             isr.close()
-            // Match the working question-paper recipe: 800x1200, quality 50
             val scaled = Bitmap.createScaledBitmap(bmp, 800, 1200, true)
             val baos = ByteArrayOutputStream()
             scaled.compress(Bitmap.CompressFormat.JPEG, 50, baos)
@@ -376,7 +375,6 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
                 .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
 
-            // Short prompt — same shape as the working question-paper prompt
             val prompt = "Transcribe everything in the image word for word as plain text. Keep the table layout, all columns, all rows. Do not add. Do not remove. Do not summarise."
 
             val content = JSONArray()
@@ -412,45 +410,74 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     }
 }
 
-// ===== AI: STAGE 2 — READ ANSWERS BY ROW + COLUMN =====
-private suspend fun extractAnswersByRowColumn(printout: String, answerKeySize: Int): Map<Int, String> {
+// ===== AI: GRADING — printout + answer key + column rules, single call =====
+private suspend fun gradeWithAI(
+    printout: String,
+    answerKeyText: String,
+    studentName: String,
+    answerKeySize: Int
+): StudentResult? {
     return withContext(Dispatchers.IO) {
         try {
             val client = OkHttpClient.Builder()
                 .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(180, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
 
             val prompt = """
-                Below is a PRINTED TRANSCRIPTION of a student's answer sheet.
-                It is a fixed-width table. The header row gives the column letters
-                (usually A | B | C | D). Each numbered row is one question, and it
-                contains one bracket cell per column.
+                You are grading a student's answer sheet.
 
-                ## HOW TO READ AN ANSWER — FOR EACH ROW (QUESTION)
-                1. If a readable letter is inside a bracket, the answer is that letter.
+                ## INPUT 1 — STUDENT PRINTOUT
+                This is a transcription of the student's answer sheet. It shows a table.
+                The header row gives the column letters (usually A | B | C | D).
+                Each numbered row is one question, with one bracket cell per column.
+
+                HOW TO READ THE STUDENT'S ANSWER FOR EACH ROW (QUESTION):
+                1. If a readable letter is inside a bracket, that letter is the answer.
                 2. If a bracket's contents are unreadable (scribble, tick, line drawn
-                   through it, or the letter cannot be made out) BUT there is a mark
-                   clearly inside that bracket, then the answer is the COLUMN HEADER
-                   of that bracket. The column header is the fallback source of truth.
+                   through it, or a letter that cannot be made out) BUT a mark is
+                   clearly inside that bracket, use the COLUMN HEADER of that bracket
+                   as the answer. The column header is the fallback source of truth.
                 3. If two brackets in the same row have readable letters, choose the
                    LEFTMOST one.
-                4. If no bracket in the row has a letter or a mark, the answer is blank.
+                4. If no bracket in the row has a letter or a mark, the student answer
+                   is blank (use an empty string).
 
-                ## OUTPUT (ONLY JSON, no markdown)
-                {"answers":{"26":"A","27":"C","28":"A","29":"B","30":"","45":"D"}}
+                ## INPUT 2 — ANSWER KEY
+                Each line looks like: Q1: Answer: B | Topic: ... | Sub-topic: ...
 
-                Use an empty string for questions left blank.
-                Cover question numbers 1 through $answerKeySize.
+                ## TASK
+                For every question in the answer key:
+                - Read the student's answer from the printout using the rules above.
+                - Compare it to the correct answer from the key.
+                - Mark it correct or wrong.
+                Then produce the score and total.
 
-                ## PRINTED TRANSCRIPTION:
+                ## OUTPUT (ONLY JSON — no markdown, no explanation, no code fences)
+                {
+                  "studentName": "$studentName",
+                  "score": 12,
+                  "total": $answerKeySize,
+                  "percentage": 60.0,
+                  "questions": [
+                    {"questionNumber":1,"topic":"Parables","studentAnswer":"A","correctAnswer":"B","isCorrect":false}
+                  ]
+                }
+
+                Cover ALL question numbers 1 through $answerKeySize.
+                Use "" for a blank student answer.
+
+                ## STUDENT PRINTOUT
                 $printout
+
+                ## ANSWER KEY
+                $answerKeyText
             """.trimIndent()
 
             val body = JSONObject()
                 .put("model", "gpt-5.6-luna")
                 .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
-                .put("max_completion_tokens", 3000)
+                .put("max_completion_tokens", 4000)
                 .put("temperature", 0.0)
                 .toString()
 
@@ -460,27 +487,71 @@ private suspend fun extractAnswersByRowColumn(printout: String, answerKeySize: I
                 .addHeader("Authorization", "Bearer $OPENAI_API_KEY")
                 .build()
 
-            val result = mutableMapOf<Int, String>()
             client.newCall(req).execute().use { res ->
-                val js = res.body?.string() ?: return@use
-                if (!res.isSuccessful) return@use
-                try {
-                    val txt = JSONObject(js).getJSONArray("choices").getJSONObject(0)
-                        .getJSONObject("message").getString("content")
-                    var clean = txt.replace("```json", "").replace("```", "").trim()
-                    val s = clean.indexOf('{'); val e = clean.lastIndexOf('}')
-                    if (s >= 0 && e > s) clean = clean.substring(s, e + 1)
-                    val arr = JSONObject(clean).getJSONObject("answers")
-                    arr.keys().forEach { k ->
-                        val qn = k.toIntOrNull() ?: return@forEach
-                        val v = arr.getString(k).uppercase().take(1)
-                        if (v in listOf("A", "B", "C", "D")) result[qn] = v
-                    }
-                } catch (e: Exception) { }
+                val js = res.body?.string() ?: return@use null
+                if (!res.isSuccessful) {
+                    android.util.Log.e("WAVEUNITS", "Grade HTTP ${res.code}: ${js.take(400)}")
+                    return@use null
+                }
+                val txt = JSONObject(js).getJSONArray("choices").getJSONObject(0)
+                    .getJSONObject("message").getString("content")
+                android.util.Log.d("WAVEUNITS", "Grade raw: ${txt.take(400)}")
+                var clean = txt.replace("```json", "").replace("```", "").trim()
+                val s = clean.indexOf('{'); val e = clean.lastIndexOf('}')
+                if (s >= 0 && e > s) clean = clean.substring(s, e + 1)
+                val o = JSONObject(clean)
+                val name = o.optString("studentName", studentName)
+                val score = o.optInt("score", 0)
+                val total = o.optInt("total", answerKeySize)
+                val pct = o.optDouble("percentage", if (total > 0) score * 100.0 / total else 0.0)
+                val qa = o.optJSONArray("questions") ?: JSONArray()
+                val qs = mutableListOf<QuestionResultData>()
+                for (i in 0 until qa.length()) {
+                    val q = qa.getJSONObject(i)
+                    qs.add(QuestionResultData(
+                        q.optInt("questionNumber", 0),
+                        q.optString("topic", "General"),
+                        q.optString("studentAnswer", "").uppercase().take(1),
+                        q.optString("correctAnswer", "").uppercase().take(1),
+                        q.optBoolean("isCorrect", false)
+                    ))
+                }
+                StudentResult(name, score, total, pct, qs)
             }
-            result
-        } catch (e: Exception) { emptyMap() }
+        } catch (e: Exception) {
+            android.util.Log.e("WAVEUNITS", "Grade exception: ${e.message}")
+            null
+        }
     }
+}
+
+// ===== Local regex fallback (no AI) — used only if gradeWithAI returns null =====
+private fun extractAnswersFromPrintoutRegex(printout: String): Map<Int, String> {
+    val answers = mutableMapOf<Int, String>()
+    if (printout.isBlank()) return answers
+
+    val rowRegex = Regex("""\|\s*(\d{1,3})\s*\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|""")
+    for (m in rowRegex.findAll(printout)) {
+        val qNum = m.groupValues[1].toIntOrNull() ?: continue
+        if (qNum < 1 || qNum > 200) continue
+        val cells = listOf(m.groupValues[2], m.groupValues[3], m.groupValues[4], m.groupValues[5])
+        val letters = listOf("A", "B", "C", "D")
+        var found: String? = null
+        for (cell in cells) {
+            val inner = cell.replace("[", "").replace("]", "").trim().uppercase()
+            if (inner.length == 1 && inner in letters) { found = inner; break }
+        }
+        if (found != null) answers[qNum] = found
+    }
+
+    if (answers.isEmpty()) {
+        val loose = Regex("""(?m)^\s*(\d{1,3})\s*[.:\-]?\s*([A-Da-d])\b""")
+        for (m in loose.findAll(printout)) {
+            val q = m.groupValues[1].toIntOrNull() ?: continue
+            if (q in 1..200) answers[q] = m.groupValues[2].uppercase()
+        }
+    }
+    return answers
 }
 
 // ===== AI: QUESTION PAPER / ANSWER KEY GENERATION =====
@@ -550,12 +621,12 @@ private suspend fun generateAIAnswerSheetWithTopics(questions: List<QuestionData
         try {
             val client = OkHttpClient.Builder().build()
             val prompt = """
-                Generate an answer sheet with Kenyan Curriculum topics for each question.
+                Generate an answer sheet with curriculum topics for each question.
                 The answer MUST be A, B, C, or D. If unknown, choose A.
                 Questions:
                 ${questions.joinToString("\n") { "Q${it.number}: ${it.topic} - Answer: ${it.correctAnswer}" }}
                 Format:
-                Q1: Answer: D | Topic: Number | Sub-topic: Addition | Strand: Mathematics
+                Q1: Answer: D | Topic: Number | Sub-topic: Addition
             """.trimIndent()
             val body = JSONObject()
                 .put("model", "gpt-5.6-luna")
@@ -587,14 +658,18 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
         try {
             val client = OkHttpClient.Builder().build()
             val prompt = """
-                You are analyzing a Mathematics exam paper for Grade 6.
-                Extract ALL questions. For each, provide:
+                You are analyzing an exam paper. Extract ALL questions. For each, provide:
                 - number (integer)
-                - topic: ONE of ["Number","Algebra","Geometry","Measurement","Fractions","Decimals","Data Handling","Arithmetic","Number Patterns"]
-                - subTopic
+                - topic: a short topic based on the actual subject of the paper.
+                  Infer the subject from the paper text itself.
+                  (e.g. for CRE: "Parables", "Old Testament", "Christian Values", "Miracles";
+                   for Maths: "Number", "Algebra", "Geometry", "Measurement";
+                   for Science: "Plants", "Animals", "Matter", "Energy";
+                   for English: "Grammar", "Comprehension", "Vocabulary").
+                - subTopic: a shorter sub-topic
                 - correctAnswer: MUST be A, B, C, or D. Never null. If unknown, choose A.
                 Return ONLY JSON:
-                [{"number":1,"topic":"Number","subTopic":"Addition","correctAnswer":"D"}, ...]
+                [{"number":1,"topic":"Parables","subTopic":"Talents","correctAnswer":"D"}, ...]
                 Question paper:
                 $rawText
             """.trimIndent()
@@ -623,7 +698,7 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
                     val safe = if (answer in listOf("A", "B", "C", "D")) answer else "A"
                     qs.add(QuestionData(
                         number = o.getInt("number"),
-                        topic = o.optString("topic", "Number"),
+                        topic = o.optString("topic", "General"),
                         correctAnswer = safe,
                         subTopic = o.optString("subTopic", "")
                     ))
@@ -1055,39 +1130,55 @@ fun WaveUnitsApp() {
                         continue
                     }
 
-                    val studentAnswers = extractAnswersByRowColumn(sheet.extractedText, maxQ)
+                    progressText = "Grading ${sheet.studentName}..."
 
-                    val allQ = (answerKeyMap.keys + studentAnswers.keys).toSortedSet()
-                    var score = 0
-                    val questions = mutableListOf<QuestionResultData>()
-                    for (q in allQ) {
-                        val correct = answerKeyMap[q] ?: ""
-                        val stu = studentAnswers[q] ?: ""
-                        val ok = stu.isNotBlank() && stu == correct
-                        if (ok) score++
-                        questions.add(QuestionResultData(q, "General", stu, correct, ok))
+                    // ? AI grading: printout + answer key + column rules in one call
+                    var result = gradeWithAI(sheet.extractedText, answerKey, sheet.studentName, maxQ)
+
+                    // Fallback: local regex extraction + local compare (only if AI failed)
+                    if (result == null || result.questions.isEmpty()) {
+                        val localAnswers = extractAnswersFromPrintoutRegex(sheet.extractedText)
+                        if (localAnswers.isNotEmpty()) {
+                            val allQ = (answerKeyMap.keys + localAnswers.keys).toSortedSet()
+                            var score = 0
+                            val qs = mutableListOf<QuestionResultData>()
+                            for (q in allQ) {
+                                val correct = answerKeyMap[q] ?: ""
+                                val stu = localAnswers[q] ?: ""
+                                val ok = stu.isNotBlank() && stu == correct
+                                if (ok) score++
+                                qs.add(QuestionResultData(q, "General", stu, correct, ok))
+                            }
+                            val total = allQ.size
+                            val pct = if (total > 0) (score.toDouble() / total) * 100 else 0.0
+                            result = StudentResult(sheet.studentName, score, total, pct, qs)
+                            Toast.makeText(context, "Used local fallback for ${sheet.studentName}", Toast.LENGTH_SHORT).show()
+                        }
                     }
-                    val total = allQ.size
-                    val pct = if (total > 0) (score.toDouble() / total) * 100 else 0.0
 
-                    val result = StudentResult(sheet.studentName, score, total, pct, questions)
+                    if (result == null || result.questions.isEmpty()) {
+                        Toast.makeText(context, "Grading failed for ${sheet.studentName}", Toast.LENGTH_LONG).show()
+                        continue
+                    }
+
                     results.add(result)
+                    val studentAnswers = result.questions.associate { it.questionNumber to it.studentAnswer }
                     val markedText = generateMarkedAnswerSheetText(sheet.studentName, studentAnswers, answerKeyMap)
-                    marked.add(MarkedAnswerSheetData(sheet.studentName, markedText, sheet.image, score, total, pct))
+                    marked.add(MarkedAnswerSheetData(sheet.studentName, markedText, sheet.image, result.score, result.totalMarks, result.percentage))
 
                     db.collection("exams").document(currentProjectId).collection("markedSheets").add(mapOf(
                         "studentName" to sheet.studentName, "markedText" to markedText,
-                        "image" to sheet.image, "score" to score, "total" to total,
-                        "percentage" to pct, "createdAt" to System.currentTimeMillis()
+                        "image" to sheet.image, "score" to result.score, "total" to result.totalMarks,
+                        "percentage" to result.percentage, "createdAt" to System.currentTimeMillis()
                     ))
                     db.collection("results").add(mapOf(
                         "teacherId" to auth.currentUser?.uid,
                         "studentName" to sheet.studentName,
                         "examId" to currentProjectId, "examTitle" to currentProjectTitle,
-                        "score" to score, "totalMarks" to total, "percentage" to pct,
-                        "gradedBy" to "printout-row-column",
+                        "score" to result.score, "totalMarks" to result.totalMarks, "percentage" to result.percentage,
+                        "gradedBy" to "ai-printout",
                         "rawText" to sheet.extractedText,
-                        "questions" to questions.map { q -> mapOf(
+                        "questions" to result.questions.map { q -> mapOf(
                             "questionNumber" to q.questionNumber, "topic" to q.topic,
                             "studentAnswer" to q.studentAnswer, "correctAnswer" to q.correctAnswer,
                             "isCorrect" to q.isCorrect) },
@@ -1098,14 +1189,14 @@ fun WaveUnitsApp() {
                         .document("${auth.currentUser?.uid}_${sheet.studentName}")
                     val existing = portfolioRef.get().await()
                     val examCount = (existing.getLong("examsTaken") ?: 0) + 1
-                    val totalScore = (existing.getDouble("totalScore") ?: 0.0) + pct
+                    val totalScore = (existing.getDouble("totalScore") ?: 0.0) + result.percentage
                     portfolioRef.set(mapOf(
                         "teacherId" to auth.currentUser?.uid,
                         "studentName" to sheet.studentName,
                         "averageScore" to (totalScore / examCount),
                         "examsTaken" to examCount, "totalScore" to totalScore,
-                        "weakTopics" to questions.filter { !it.isCorrect }.map { it.topic }.distinct(),
-                        "strongTopics" to questions.filter { it.isCorrect }.map { it.topic }.distinct()
+                        "weakTopics" to result.questions.filter { !it.isCorrect }.map { it.topic }.distinct(),
+                        "strongTopics" to result.questions.filter { it.isCorrect }.map { it.topic }.distinct()
                     ))
                 }
 
