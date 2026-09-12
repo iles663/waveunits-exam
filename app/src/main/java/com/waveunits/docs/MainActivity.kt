@@ -392,102 +392,99 @@ private suspend fun gradeWithAI(
     studentName: String
 ): StudentResult? {
     return withContext(Dispatchers.IO) {
-        try {
-            val client = OkHttpClient.Builder()
-                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(180, java.util.concurrent.TimeUnit.SECONDS)
-                .build()
+        val client = OkHttpClient.Builder()
+            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(180, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
 
-            val prompt = """
-                You are grading a student's answer sheet.
+        val prompt = """
+            You are grading a student's answer sheet.
 
-                ## INPUT 1 — STUDENT PRINTOUT
-                A transcription of the student's answer sheet. Each row is a
-                question number with bracket cells under columns A | B | C | D.
-                The student marked the chosen column by writing a letter inside
-                the bracket. If a mark is there but the letter is unclear, use
-                the column header (A/B/C/D) as the answer. If nothing is marked,
-                the answer is blank.
+            ## INPUT 1 — STUDENT PRINTOUT
+            A transcription of the student's answer sheet. Each row is a
+            question number with bracket cells under columns A | B | C | D.
+            The student marked the chosen column by writing a letter inside
+            the bracket. If a mark is there but the letter is unclear, use
+            the column header (A/B/C/D) as the answer. If nothing is marked,
+            the answer is blank.
 
-                ## INPUT 2 — ANSWER KEY
-                The correct answer for each question.
+            ## INPUT 2 — ANSWER KEY
+            The correct answer for each question.
 
-                ## TASK
-                Match by QUESTION NUMBER. For each question that appears in
-                BOTH the printout and the answer key, compare the student's
-                answer to the correct answer.
+            ## TASK
+            Match by QUESTION NUMBER. For each question that appears in
+            BOTH the printout and the answer key, compare the student's
+            answer to the correct answer.
 
-                ## OUTPUT
-                Write the result in any clear, human-readable format. For
-                example, one line per question:
+            ## OUTPUT
+            Write the result in any clear, human-readable format. For
+            example, one line per question:
 
-                Q1: Student chose A, correct answer is B ? WRONG
-                Q2: Student chose C, correct answer is C ? CORRECT
-                Q3: Student chose B, correct answer is A ? WRONG
+            Q1: Student chose A, correct answer is B ? WRONG
+            Q2: Student chose C, correct answer is C ? CORRECT
+            Q3: Student chose B, correct answer is A ? WRONG
 
-                Or a table. Or JSON. Or any other readable form. Just make it
-                clear which question is which, what the student chose, what
-                the correct answer is, and whether it was correct.
+            At the very end, on its own line, write:
+            SCORE: <number correct> / <total>
+            PERCENTAGE: <number>%
+            GRADE: <letter>
 
-                At the very end, on its own line, write:
-                SCORE: <number correct> / <total>
-                PERCENTAGE: <number>%
-                GRADE: <letter>
+            Do not skip any question that appears in both inputs.
+            Do not invent questions that are not in the inputs.
 
-                Do not skip any question that appears in both inputs.
-                Do not invent questions that are not in the inputs.
+            ===== STUDENT PRINTOUT =====
+            $printout
 
-                ===== STUDENT PRINTOUT =====
-                $printout
+            ===== ANSWER KEY =====
+            $aiAnswerSheetText
+        """.trimIndent()
 
-                ===== ANSWER KEY =====
-                $aiAnswerSheetText
-            """.trimIndent()
+        val body = JSONObject()
+            .put("model", "gpt-5.6-luna")
+            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
+            .put("max_completion_tokens", 4000)
+            .put("temperature", 0.0)
+            .toString()
 
-            val body = JSONObject()
-                .put("model", "gpt-5.6-luna")
-                .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
-                .put("max_completion_tokens", 4000)
-                .put("temperature", 0.0)
-                .toString()
+        val req = Request.Builder()
+            .url("https://api.openai.com/v1/chat/completions")
+            .post(body.toRequestBody("application/json".toMediaType()))
+            .addHeader("Authorization", "Bearer $OPENAI_API_KEY")
+            .build()
 
-            val req = Request.Builder()
-                .url("https://api.openai.com/v1/chat/completions")
-                .post(body.toRequestBody("application/json".toMediaType()))
-                .addHeader("Authorization", "Bearer $OPENAI_API_KEY")
-                .build()
-
-            client.newCall(req).execute().use { res ->
-                val js = res.body?.string() ?: return@use null
-                if (!res.isSuccessful) return@use null
-
-                val txt = JSONObject(js).getJSONArray("choices").getJSONObject(0)
-                    .getJSONObject("message").getString("content").trim()
-                if (txt.isBlank()) return@use null
-
-                var score = 0
-                var total = 0
-                var pct = 0.0
-
-                val scoreRegex = Regex("""SCORE\s*:\s*(\d+)\s*/\s*(\d+)""", RegexOption.IGNORE_CASE)
-                scoreRegex.find(txt)?.let {
-                    score = it.groupValues[1].toIntOrNull() ?: 0
-                    total = it.groupValues[2].toIntOrNull() ?: 0
-                    if (total > 0) pct = score * 100.0 / total
-                }
-
-                val single = QuestionResultData(
-                    questionNumber = 0,
-                    topic = "ai-text",
-                    studentAnswer = txt,
-                    correctAnswer = "",
-                    isCorrect = score > 0
-                )
-                StudentResult(studentName, score, total, pct, listOf(single))
+        var result: StudentResult? = null
+        client.newCall(req).execute().use { res ->
+            val js = res.body?.string() ?: return@use
+            if (!res.isSuccessful) {
+                throw RuntimeException("HTTP ${res.code}: ${js.take(400)}")
             }
-        } catch (e: Exception) {
-            null
+            val txt = JSONObject(js).getJSONArray("choices").getJSONObject(0)
+                .getJSONObject("message").getString("content").trim()
+            if (txt.isBlank()) {
+                throw RuntimeException("Empty AI reply")
+            }
+
+            var score = 0
+            var total = 0
+            var pct = 0.0
+
+            val scoreRegex = Regex("""SCORE\s*:\s*(\d+)\s*/\s*(\d+)""", RegexOption.IGNORE_CASE)
+            scoreRegex.find(txt)?.let {
+                score = it.groupValues[1].toIntOrNull() ?: 0
+                total = it.groupValues[2].toIntOrNull() ?: 0
+                if (total > 0) pct = score * 100.0 / total
+            }
+
+            val single = QuestionResultData(
+                questionNumber = 0,
+                topic = "ai-text",
+                studentAnswer = txt,
+                correctAnswer = "",
+                isCorrect = score > 0
+            )
+            result = StudentResult(studentName, score, total, pct, listOf(single))
         }
+        result
     }
 }
 
@@ -1119,10 +1116,15 @@ fun WaveUnitsApp() {
                 for (sheet in gradable) {
                     progressText = "Grading ${sheet.studentName}..."
 
-                    val result = gradeWithAI(sheet.extractedText, aiSheetForGrading, sheet.studentName)
+                    val result = try {
+                        gradeWithAI(sheet.extractedText, aiSheetForGrading, sheet.studentName)
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "GRADE ERROR for ${sheet.studentName}: ${e.message?.take(250) ?: "unknown"}", Toast.LENGTH_LONG).show()
+                        null
+                    }
 
                     if (result == null || result.questions.isEmpty()) {
-                        Toast.makeText(context, "AI could not grade ${sheet.studentName}. Skipped.", Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, "AI could not grade ${sheet.studentName} (empty result)", Toast.LENGTH_LONG).show()
                         continue
                     }
 
