@@ -347,24 +347,37 @@ fun generateAnswerSheetTemplate(questionCount: Int): String {
     return sb.toString()
 }
 
-// ===== AI: STAGE 1 — TRANSCRIBE ANSWER SHEET =====
+// ===== AI: STAGE 1 — TRANSCRIBE ANSWER SHEET (high res for pencil marks) =====
 private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     return withContext(Dispatchers.IO) {
         try {
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext "ERR: cannot open image"
             val bmp = BitmapFactory.decodeStream(isr)
             isr.close()
-            val scaled = Bitmap.createScaledBitmap(bmp, 800, 1200, true)
+            // High resolution + high quality — required for faint pencil marks
+            val scaled = Bitmap.createScaledBitmap(bmp, 1400, 2000, true)
             val baos = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 50, baos)
+            scaled.compress(Bitmap.CompressFormat.JPEG, 90, baos)
             val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
 
             val client = OkHttpClient.Builder()
                 .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(180, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
 
-            val prompt = "Transcribe everything in the image word for word as plain text. Keep the table layout, all columns, all rows. Do not add. Do not remove. Do not summarise."
+            val prompt = """
+                Transcribe everything in the image as plain text.
+                Keep the table layout, all columns, all rows.
+                Do not add. Do not remove. Do not summarise.
+
+                IMPORTANT: The student has marked their answers by writing a letter
+                (A, B, C, or D) or drawing a line/tick inside the bracket of the
+                chosen column. Look VERY carefully at the bracket cells for
+                handwritten marks — pencil, pen, cross, or line. Print the letter
+                you see inside each bracket. If a bracket has a mark but the letter
+                is unclear, print the column letter (A/B/C/D) inside that bracket.
+                Print EMPTY brackets as [   ].
+            """.trimIndent()
 
             val content = JSONArray()
                 .put(JSONObject().put("type", "text").put("text", prompt))
@@ -399,7 +412,7 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     }
 }
 
-// ===== AI GRADING: printout + AI answer sheet, one call =====
+// ===== AI GRADING: printout + AI answer sheet + column rules =====
 private suspend fun gradeWithAI(
     printout: String,
     aiAnswerSheetText: String,
@@ -418,9 +431,9 @@ private suspend fun gradeWithAI(
                 ============================================================
                 INPUT 1 — STUDENT PRINTOUT
                 ============================================================
-                This is a transcription of the student's answer sheet. The
-                student chose one option per question by marking inside a
-                bracket cell, on the answer sheet grid.
+                This is a transcription of the student's answer sheet.
+                The student chose one option per question by marking inside a
+                bracket cell on the answer-sheet grid.
 
                 HOW TO READ THE STUDENT'S ANSWERS — COLUMN RULES:
                 1. Each row is one question, identified by its number.
@@ -428,14 +441,13 @@ private suspend fun gradeWithAI(
                 3. For each question, look at the four bracket cells.
                 4. If a readable letter (A, B, C, D) is inside a bracket,
                    that letter is the student's answer.
-                5. If a bracket's contents are unreadable (tick, scribble, a
-                   line drawn through it, or a letter you cannot make out)
+                5. If a bracket's contents are unreadable (tick, scribble,
+                   a line drawn through it, or a letter you cannot make out)
                    BUT a mark is clearly inside that bracket, use the
-                   COLUMN HEADER of that bracket as the answer. The column
-                   header is the fallback source of truth.
+                   COLUMN HEADER of that bracket as the answer.
                 6. If two brackets in the same row have readable letters,
                    choose the LEFTMOST one.
-                7. If no bracket in that row has a letter or a mark, the
+                7. If no bracket in the row has a letter or a mark, the
                    student's answer is blank.
 
                 ============================================================
@@ -501,7 +513,6 @@ private suspend fun gradeWithAI(
                 }
                 val txt = JSONObject(js).getJSONArray("choices").getJSONObject(0)
                     .getJSONObject("message").getString("content")
-                android.util.Log.d("WAVEUNITS", "Grade raw: ${txt.take(500)}")
                 var clean = txt.replace("```json", "").replace("```", "").trim()
                 val s = clean.indexOf('{'); val e = clean.lastIndexOf('}')
                 if (s >= 0 && e > s) clean = clean.substring(s, e + 1)
@@ -1086,14 +1097,13 @@ fun WaveUnitsApp() {
                 isGrading = true
                 progressText = "Grading ${collectedStudentAnswerSheets.size} sheets..."
 
-                // Get the AI answer sheet text (Full: block) from Firestore if not in memory
                 var aiSheetForGrading = aiAnswerSheet
                 if (aiSheetForGrading.isBlank()) {
                     val doc = db.collection("exams").document(currentProjectId).get().await()
                     aiSheetForGrading = doc.getString("aiAnswerSheet") ?: ""
                 }
                 if (aiSheetForGrading.isBlank()) {
-                    Toast.makeText(context, "No AI answer sheet found. Please scan the question paper first.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "No AI answer sheet. Scan the question paper first.", Toast.LENGTH_LONG).show()
                     isGrading = false; return@launch
                 }
 
@@ -1113,7 +1123,7 @@ fun WaveUnitsApp() {
 
                     progressText = "Grading ${sheet.studentName}..."
 
-                    // ? Send printout + AI answer sheet to AI. It applies the column rules and grades.
+                    // Send printout + AI answer sheet + column rules. AI does the marking.
                     val result = gradeWithAI(sheet.extractedText, aiSheetForGrading, sheet.studentName)
 
                     if (result == null || result.questions.isEmpty()) {
@@ -1123,7 +1133,6 @@ fun WaveUnitsApp() {
 
                     results.add(result)
 
-                    // Build a marked-sheet text using the AI's per-question results
                     val studentAnswers = result.questions.associate { it.questionNumber to it.studentAnswer }
                     val answerKeyMap = result.questions.associate { it.questionNumber to it.correctAnswer }
                     val markedText = generateMarkedAnswerSheetText(sheet.studentName, studentAnswers, answerKeyMap)
@@ -1139,7 +1148,7 @@ fun WaveUnitsApp() {
                         "studentName" to sheet.studentName,
                         "examId" to currentProjectId, "examTitle" to currentProjectTitle,
                         "score" to result.score, "totalMarks" to result.totalMarks, "percentage" to result.percentage,
-                        "gradedBy" to "ai-printout-column-rules",
+                        "gradedBy" to "ai-printout-vs-answer-sheet",
                         "rawText" to sheet.extractedText,
                         "questions" to result.questions.map { q -> mapOf(
                             "questionNumber" to q.questionNumber, "topic" to q.topic,
