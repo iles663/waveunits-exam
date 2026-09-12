@@ -34,6 +34,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInClient
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.common.api.ApiException
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.ktx.auth
 import com.google.firebase.firestore.ktx.firestore
 import com.google.firebase.ktx.Firebase
@@ -405,7 +411,7 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     }
 }
 
-// ===== AI GRADING — match by question number, mark what matches =====
+// ===== AI GRADING — match by question number, line format =====
 private suspend fun gradeWithAI(
     printout: String,
     aiAnswerSheetText: String,
@@ -419,56 +425,39 @@ private suspend fun gradeWithAI(
                 .build()
 
             val prompt = """
-                You are grading a student's answer sheet.
+                Grade the student's answer sheet.
 
-                ## INPUT 1 — STUDENT PRINTOUT
-                A transcription of the student's answer sheet. Each row is one
-                question number with four bracket cells (columns A | B | C | D).
+                RULES:
+                - The student printout shows one row per question, with bracket cells
+                  under columns A | B | C | D.
+                - The student's answer is the letter inside a bracket in that row.
+                  If a bracket has a mark but the letter is unclear, use the column
+                  header (A/B/C/D) as the answer.
+                  If two brackets have letters, use the leftmost.
+                  If nothing is marked, the answer is blank.
+                - The answer key shows the correct answer for each question.
+                - Match by QUESTION NUMBER only. If a number appears in both the
+                  answer key and the printout, grade it. If a number appears in
+                  only one, skip it. Never invent a number. Never pad.
 
-                ## INPUT 2 — ANSWER KEY
-                Each entry is one question number and its correct answer, in
-                a format like: Q7: Answer: B | Topic: ...
+                OUTPUT FORMAT — one line per graded question, nothing else:
+                Q<number>|<studentAnswer>|<correctAnswer>|<C or W>
 
-                ## HOW TO READ A STUDENT'S ANSWER — COLUMN RULES
-                For each question number:
-                1. Look at the four bracket cells in that row.
-                2. If a readable letter (A/B/C/D) is inside a bracket, that
-                   letter is the student's answer.
-                3. If a bracket has a mark (tick, scribble, line through it)
-                   but the letter is unreadable, use the COLUMN HEADER of
-                   that bracket as the answer.
-                4. If two brackets in the row have readable letters, choose
-                   the LEFTMOST one.
-                5. If no bracket has a letter or a mark, the student's answer
-                   is blank.
+                Example:
+                Q1|A|B|W
+                Q7||C|W
+                Q12|C|C|C
 
-                ## MATCHING RULE — THE ONLY RULE
-                For every question number that appears in the ANSWER KEY:
-                  - If the same question number also appears in the STUDENT
-                    PRINTOUT, mark it.
-                  - If the question number does NOT appear in the printout,
-                    skip it. Do not invent it. Do not pad.
-                Do not worry about totals. Do not try to reach a fixed count.
-                Just mark whatever numbers match between the two inputs.
-                Even if only one question matches, mark that one question.
+                Use one uppercase letter A/B/C/D for studentAnswer and correctAnswer.
+                Use "" between pipes for a blank student answer.
+                Write C at the end if correct, W if wrong.
+                Do not write anything before, between, or after these lines.
+                No JSON. No markdown. No commentary.
 
-                ## OUTPUT — ONLY a JSON object, no markdown, no commentary
-                {
-                  "studentName": "$studentName",
-                  "questions": [
-                    {"questionNumber":7,"topic":"Parables","studentAnswer":"A","correctAnswer":"B","isCorrect":false}
-                  ]
-                }
-
-                Do NOT include "score", "total", or "percentage" — the app
-                computes those. Just the "questions" array with the matched
-                question numbers.
-                Use "" for a blank student answer.
-
-                ## STUDENT PRINTOUT
+                ===== STUDENT PRINTOUT =====
                 $printout
 
-                ## ANSWER KEY
+                ===== ANSWER KEY =====
                 $aiAnswerSheetText
             """.trimIndent()
 
@@ -492,42 +481,24 @@ private suspend fun gradeWithAI(
                 val txt = JSONObject(js).getJSONArray("choices").getJSONObject(0)
                     .getJSONObject("message").getString("content").trim()
 
-                // Tolerant parse: accept object or array, strip code fences.
-                var clean = txt.replace("```json", "").replace("```", "").trim()
-
-                val firstBrace = clean.indexOf('{')
-                val firstBracket = clean.indexOf('[')
-                if (firstBracket >= 0 && (firstBrace < 0 || firstBracket < firstBrace)) {
-                    val endBracket = clean.lastIndexOf(']')
-                    if (endBracket > firstBracket) {
-                        val arr = JSONArray(clean.substring(firstBracket, endBracket + 1))
-                        clean = JSONObject().put("questions", arr).toString()
-                    }
-                } else {
-                    val s = clean.indexOf('{'); val e = clean.lastIndexOf('}')
-                    if (s >= 0 && e > s) clean = clean.substring(s, e + 1)
-                }
-
-                val o = JSONObject(clean)
-                val name = o.optString("studentName", studentName)
-                val qa = o.optJSONArray("questions") ?: JSONArray()
                 val qs = mutableListOf<QuestionResultData>()
-                for (i in 0 until qa.length()) {
-                    val q = qa.getJSONObject(i)
-                    qs.add(QuestionResultData(
-                        q.optInt("questionNumber", 0),
-                        q.optString("topic", "General"),
-                        q.optString("studentAnswer", "").uppercase().take(1),
-                        q.optString("correctAnswer", "").uppercase().take(1),
-                        q.optBoolean("isCorrect", false)
-                    ))
+                val lineRegex = Regex("""Q\s*(\d+)\s*\|\s*([A-Da-d]?)\s*\|\s*([A-Da-d]?)\s*\|\s*([CWcw])""")
+                for (line in txt.lines()) {
+                    val m = lineRegex.find(line.trim()) ?: continue
+                    val num = m.groupValues[1].toIntOrNull() ?: continue
+                    val stu = m.groupValues[2].uppercase().take(1)
+                    val cor = m.groupValues[3].uppercase().take(1)
+                    val isC = m.groupValues[4].uppercase() == "C"
+                    qs.add(QuestionResultData(num, "General", stu, cor, isC))
                 }
+
                 if (qs.isEmpty()) return@use null
 
-                val correct = qs.count { it.isCorrect }
-                val total = qs.size
+                val sorted = qs.sortedBy { it.questionNumber }
+                val correct = sorted.count { it.isCorrect }
+                val total = sorted.size
                 val pct = if (total > 0) correct * 100.0 / total else 0.0
-                StudentResult(name, correct, total, pct, qs)
+                StudentResult(studentName, correct, total, pct, sorted)
             }
         } catch (e: Exception) {
             null
@@ -748,6 +719,15 @@ fun WaveUnitsApp() {
     val context = LocalContext.current
     val activity = context as Activity
 
+    // Google Sign-In client
+    val gso = remember {
+        GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+         .requestIdToken("705925410232-d010rgrfnp8o755007sakn8u1b4ndorp.apps.googleusercontent.com")
+            .requestEmail()
+            .build()
+    }
+    val googleSignInClient: GoogleSignInClient = remember { GoogleSignIn.getClient(context, gso) }
+
     val prefs = context.getSharedPreferences("WaveUnitsPrefs", Context.MODE_PRIVATE)
     var email by remember { mutableStateOf(prefs.getString("email", "") ?: "") }
     var password by remember { mutableStateOf(prefs.getString("password", "") ?: "") }
@@ -799,6 +779,42 @@ fun WaveUnitsApp() {
     fun saveLoginState(isLogged: Boolean) {
         prefs.edit().putBoolean("isLoggedIn", isLogged)
             .putString("email", email).putString("password", password).apply()
+    }
+
+    // Google Sign-In launcher
+    val googleLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
+        try {
+            val account = task.getResult(ApiException::class.java)
+            val idToken = account.idToken
+            if (idToken == null) {
+                Toast.makeText(context, "Google sign-in failed: no ID token", Toast.LENGTH_LONG).show()
+                return@rememberLauncherForActivityResult
+            }
+            val credential = GoogleAuthProvider.getCredential(idToken, null)
+            auth.signInWithCredential(credential).addOnCompleteListener { t ->
+                if (t.isSuccessful) {
+                    isLoggedIn = true
+                    saveLoginState(true)
+                    Toast.makeText(context, "Signed in", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Sign-in failed: ${t.exception?.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        } catch (e: ApiException) {
+            Toast.makeText(context, "Google sign-in error: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        // Auto-login if Firebase has a current user
+        val cu = auth.currentUser
+        if (cu != null) {
+            isLoggedIn = true
+            saveLoginState(true)
+        }
     }
 
     fun loadProjects() {
@@ -1245,56 +1261,6 @@ fun WaveUnitsApp() {
         }
     }
 
-    fun saveQuestionPaperText() {
-        scope.launch {
-            try {
-                db.collection("exams").document(currentProjectId).update(mapOf(
-                    "questionPaperText" to questionPaperText, "extractedTextSaved" to true))
-                Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) { Toast.makeText(context, "${e.message}", Toast.LENGTH_SHORT).show() }
-        }
-    }
-
-    fun saveAIAnswerSheetText() {
-        scope.launch {
-            try {
-                db.collection("exams").document(currentProjectId).update(mapOf(
-                    "aiAnswerSheet" to aiAnswerSheet,
-                    "simplifiedAnswerKey" to simplifiedAnswerKey,
-                    "answerKey" to simplifiedAnswerKey))
-                Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) { Toast.makeText(context, "${e.message}", Toast.LENGTH_SHORT).show() }
-        }
-    }
-
-    fun saveManualAnswerSheetText() {
-        scope.launch {
-            try {
-                db.collection("exams").document(currentProjectId).update(mapOf(
-                    "manualAnswerSheet" to manualAnswerSheetText,
-                    "manualAnswerKey" to manualAnswerKey,
-                    "answerKey" to manualAnswerKey))
-                Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) { Toast.makeText(context, "${e.message}", Toast.LENGTH_SHORT).show() }
-        }
-    }
-
-    fun saveCollectedSheets() {
-        scope.launch {
-            try {
-                val sheetsData = collectedStudentAnswerSheets.map { s ->
-                    mapOf("studentName" to s.studentName,
-                        "extractedText" to s.extractedText,
-                        "image" to s.image,
-                        "answers" to s.answers.mapKeys { it.key.toString() }.mapValues { it.value })
-                }
-                db.collection("exams").document(currentProjectId).update(
-                    mapOf("studentAnswerSheets" to sheetsData))
-                Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) { Toast.makeText(context, "${e.message}", Toast.LENGTH_SHORT).show() }
-        }
-    }
-
     fun saveReportToDownloads(text: String) {
         try {
             val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
@@ -1316,18 +1282,6 @@ fun WaveUnitsApp() {
             }
             context.startActivity(Intent.createChooser(i, "Share"))
         } catch (e: Exception) { Toast.makeText(context, "${e.message}", Toast.LENGTH_SHORT).show() }
-    }
-
-    fun saveAnswerSheetTemplate(text: String) {
-        try {
-            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            if (!dir.exists()) dir.mkdirs()
-            val file = File(dir, "WaveUnits_AnswerSheet_${System.currentTimeMillis()}.txt")
-            FileWriter(file).use { it.write(text) }
-            Toast.makeText(context, "Saved: ${file.name}", Toast.LENGTH_LONG).show()
-        } catch (e: Exception) {
-            Toast.makeText(context, "${e.message}", Toast.LENGTH_LONG).show()
-        }
     }
 
     val scannerLauncher = rememberLauncherForActivityResult(
@@ -1363,6 +1317,7 @@ fun WaveUnitsApp() {
                             val newSimp = parseAISheetToSimplified(newAI)
                             simplifiedAnswerKey = if (simplifiedAnswerKey.isBlank()) newSimp else "$simplifiedAnswerKey,$newSimp"
                             answerKey = simplifiedAnswerKey
+                            // ? Auto-save everything
                             db.collection("exams").document(currentProjectId).update(mapOf(
                                 "questionPaperImages" to newImages,
                                 "allQuestionTexts" to newTexts,
@@ -1370,7 +1325,7 @@ fun WaveUnitsApp() {
                                 "aiAnswerSheet" to aiAnswerSheet,
                                 "simplifiedAnswerKey" to simplifiedAnswerKey,
                                 "answerKey" to simplifiedAnswerKey,
-                                "extractedTextSaved" to false,
+                                "extractedTextSaved" to true,
                                 "answerSheetGenerated" to true,
                                 "markingMode" to "ai"))
                             progressText = "Extracted ${allQs.size}. Total: ${newQs.size}."
@@ -1385,6 +1340,7 @@ fun WaveUnitsApp() {
                             val newKey = parsed.joinToString(",") { "${it.first}:${it.second}" }
                             manualAnswerKey = if (manualAnswerKey.isBlank()) newKey else "$manualAnswerKey,$newKey"
                             answerKey = manualAnswerKey
+                            // ? Auto-save
                             db.collection("exams").document(currentProjectId).update(mapOf(
                                 "manualAnswerSheet" to manualAnswerSheetText,
                                 "manualAnswerKey" to manualAnswerKey,
@@ -1420,6 +1376,7 @@ fun WaveUnitsApp() {
                                     image = imgB64
                                 ))
                             }
+                            // ? Auto-save collected sheets
                             val newCollected = collectedStudentAnswerSheets + newSheets
                             val sheetsData = newCollected.map { s ->
                                 mapOf("studentName" to s.studentName,
@@ -1475,6 +1432,21 @@ fun WaveUnitsApp() {
                 ) {
                     Text("WaveUnits", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                     Spacer(modifier = Modifier.height(32.dp))
+
+                    // ? Google Sign-In
+                    Button(
+                        onClick = {
+                            val signInIntent = googleSignInClient.signInIntent
+                            googleLauncher.launch(signInIntent)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDB4437))
+                    ) { Text("Sign in with Google") }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("— or —", color = Color(0xFF94a3b8), fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(16.dp))
+
                     OutlinedTextField(value = email, onValueChange = { email = it },
                         label = { Text("Email") }, modifier = Modifier.fillMaxWidth())
                     Spacer(modifier = Modifier.height(8.dp))
@@ -1530,7 +1502,10 @@ fun WaveUnitsApp() {
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1e293b)),
                         actions = {
                             IconButton(onClick = {
-                                auth.signOut(); isLoggedIn = false; saveLoginState(false)
+                                scope.launch {
+                                    try { googleSignInClient.signOut().await() } catch (_: Exception) {}
+                                    auth.signOut(); isLoggedIn = false; saveLoginState(false)
+                                }
                             }) { Text("Exit", fontSize = 14.sp) }
                         }
                     )
@@ -1784,7 +1759,7 @@ fun WaveUnitsApp() {
                                                     Text("Preview:", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                                                     Text(generatedAnswerSheetText, color = Color.White, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                                                     Spacer(modifier = Modifier.height(8.dp))
-                                                    Button(onClick = { saveAnswerSheetTemplate(generatedAnswerSheetText) },
+                                                    Button(onClick = { saveReportToDownloads(generatedAnswerSheetText) },
                                                         modifier = Modifier.fillMaxWidth(),
                                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
                                                     ) { Text("Save to Downloads") }
@@ -2030,11 +2005,6 @@ fun WaveUnitsApp() {
                                                     Text("Extracted Text:", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                                                     Text(questionPaperText, color = Color.White, fontSize = 12.sp)
                                                 }
-                                                Spacer(modifier = Modifier.height(16.dp))
-                                                Button(onClick = { saveQuestionPaperText() },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("Save") }
                                             }
                                         }
                                     } else if (sectionState.isAIAnswerSheetOpen) {
@@ -2056,11 +2026,6 @@ fun WaveUnitsApp() {
                                                     Text("Full:", fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                                     Text(aiAnswerSheet, color = Color.White, fontSize = 12.sp)
                                                 }
-                                                Spacer(modifier = Modifier.height(16.dp))
-                                                Button(onClick = { saveAIAnswerSheetText() },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("Save") }
                                             }
                                         }
                                     } else if (sectionState.isManualAnswerSheetOpen) {
@@ -2087,11 +2052,6 @@ fun WaveUnitsApp() {
                                                     Text("Text:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
                                                     Text(manualAnswerSheetText, color = Color.White, fontSize = 12.sp)
                                                 }
-                                                Spacer(modifier = Modifier.height(16.dp))
-                                                Button(onClick = { saveManualAnswerSheetText() },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                                ) { Text("Save") }
                                             }
                                         }
                                     } else if (sectionState.isCollectedSheetsOpen) {
@@ -2161,11 +2121,6 @@ fun WaveUnitsApp() {
                                             }
                                             item {
                                                 Spacer(modifier = Modifier.height(16.dp))
-                                                Button(onClick = { saveCollectedSheets() },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("Save Collected") }
-                                                Spacer(modifier = Modifier.height(8.dp))
                                                 Button(
                                                     onClick = {
                                                         scope.launch {
