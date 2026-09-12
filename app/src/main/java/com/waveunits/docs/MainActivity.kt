@@ -3,7 +3,6 @@ package com.waveunits.docs
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -145,11 +144,6 @@ data class ExamAnalyticsBundle(
 data class MarkedAnswerSheetData(
     val studentName: String, val markedText: String, val image: String,
     val score: Int, val total: Int, val percentage: Double
-)
-
-data class ScannedAnswerSheet(
-    val studentName: String, val image: String, val extractedText: String,
-    val answers: Map<Int, String>, val score: Int, val total: Int, val percentage: Double
 )
 
 data class AIQuestionAnswer(val id: String = "", val question: String = "", val answer: String = "", val createdAt: String = "")
@@ -347,14 +341,13 @@ fun generateAnswerSheetTemplate(questionCount: Int): String {
     return sb.toString()
 }
 
-// ===== AI: STAGE 1 — TRANSCRIBE ANSWER SHEET (high res for pencil marks) =====
+// ===== AI: STAGE 1 — TRANSCRIBE ANSWER SHEET =====
 private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     return withContext(Dispatchers.IO) {
         try {
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext "ERR: cannot open image"
             val bmp = BitmapFactory.decodeStream(isr)
             isr.close()
-            // High resolution + high quality — required for faint pencil marks
             val scaled = Bitmap.createScaledBitmap(bmp, 1400, 2000, true)
             val baos = ByteArrayOutputStream()
             scaled.compress(Bitmap.CompressFormat.JPEG, 90, baos)
@@ -412,7 +405,7 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     }
 }
 
-// ===== AI GRADING: printout + AI answer sheet + column rules =====
+// ===== AI GRADING =====
 private suspend fun gradeWithAI(
     printout: String,
     aiAnswerSheetText: String,
@@ -507,10 +500,8 @@ private suspend fun gradeWithAI(
 
             client.newCall(req).execute().use { res ->
                 val js = res.body?.string() ?: return@use null
-                if (!res.isSuccessful) {
-                    android.util.Log.e("WAVEUNITS", "Grade HTTP ${res.code}: ${js.take(500)}")
-                    return@use null
-                }
+                android.util.Log.e("WAVEUNITS", "gradeWithAI HTTP ${res.code}: ${js.take(600)}")
+                if (!res.isSuccessful) return@use null
                 val txt = JSONObject(js).getJSONArray("choices").getJSONObject(0)
                     .getJSONObject("message").getString("content")
                 var clean = txt.replace("```json", "").replace("```", "").trim()
@@ -536,7 +527,7 @@ private suspend fun gradeWithAI(
                 StudentResult(name, score, total, pct, qs)
             }
         } catch (e: Exception) {
-            android.util.Log.e("WAVEUNITS", "Grade exception: ${e.message}")
+            android.util.Log.e("WAVEUNITS", "gradeWithAI exception: ${e.message}")
             null
         }
     }
@@ -650,10 +641,6 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
                 - number (integer)
                 - topic: a short topic based on the actual subject of the paper.
                   Infer the subject from the paper text itself.
-                  (e.g. for CRE: "Parables", "Old Testament", "Christian Values", "Miracles";
-                   for Maths: "Number", "Algebra", "Geometry", "Measurement";
-                   for Science: "Plants", "Animals", "Matter", "Energy";
-                   for English: "Grammar", "Comprehension", "Vocabulary").
                 - subTopic: a shorter sub-topic
                 - correctAnswer: MUST be A, B, C, or D. Never null. If unknown, choose A.
                 Return ONLY JSON:
@@ -1097,42 +1084,52 @@ fun WaveUnitsApp() {
                 isGrading = true
                 progressText = "Grading ${collectedStudentAnswerSheets.size} sheets..."
 
+                // Pre-flight: AI answer sheet must exist
                 var aiSheetForGrading = aiAnswerSheet
                 if (aiSheetForGrading.isBlank()) {
                     val doc = db.collection("exams").document(currentProjectId).get().await()
                     aiSheetForGrading = doc.getString("aiAnswerSheet") ?: ""
                 }
                 if (aiSheetForGrading.isBlank()) {
-                    Toast.makeText(context, "No AI answer sheet. Scan the question paper first.", Toast.LENGTH_LONG).show()
-                    isGrading = false; return@launch
+                    isGrading = false
+                    Toast.makeText(context, "Cannot grade: no AI answer sheet saved. Scan the question paper first.", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+
+                // Pre-flight: collected sheets must exist
+                if (collectedStudentAnswerSheets.isEmpty()) {
+                    isGrading = false
+                    Toast.makeText(context, "Cannot grade: no collected answer sheets yet.", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+
+                // Pre-flight: at least one sheet has a usable printout
+                val gradable = collectedStudentAnswerSheets.filter {
+                    it.studentName.isNotBlank() &&
+                    it.studentName != "Unknown" &&
+                    it.extractedText.isNotBlank() &&
+                    !it.extractedText.startsWith("ERR")
+                }
+                if (gradable.isEmpty()) {
+                    isGrading = false
+                    Toast.makeText(context, "Cannot grade: all collected sheets have empty printouts. Rescan them.", Toast.LENGTH_LONG).show()
+                    return@launch
                 }
 
                 val results = mutableListOf<StudentResult>()
                 val marked = mutableListOf<MarkedAnswerSheetData>()
 
-                for (sheet in collectedStudentAnswerSheets) {
-                    if (sheet.studentName.isBlank() || sheet.studentName == "Unknown") continue
-                    if (sheet.extractedText.isBlank()) {
-                        Toast.makeText(context, "Skipping ${sheet.studentName}: empty printout", Toast.LENGTH_LONG).show()
-                        continue
-                    }
-                    if (sheet.extractedText.startsWith("ERR")) {
-                        Toast.makeText(context, "Skipping ${sheet.studentName}: ${sheet.extractedText.take(120)}", Toast.LENGTH_LONG).show()
-                        continue
-                    }
-
+                for (sheet in gradable) {
                     progressText = "Grading ${sheet.studentName}..."
 
-                    // Send printout + AI answer sheet + column rules. AI does the marking.
                     val result = gradeWithAI(sheet.extractedText, aiSheetForGrading, sheet.studentName)
 
                     if (result == null || result.questions.isEmpty()) {
-                        Toast.makeText(context, "Grading failed for ${sheet.studentName}", Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, "AI could not grade ${sheet.studentName}. Skipped.", Toast.LENGTH_LONG).show()
                         continue
                     }
 
                     results.add(result)
-
                     val studentAnswers = result.questions.associate { it.questionNumber to it.studentAnswer }
                     val answerKeyMap = result.questions.associate { it.questionNumber to it.correctAnswer }
                     val markedText = generateMarkedAnswerSheetText(sheet.studentName, studentAnswers, answerKeyMap)
@@ -1173,8 +1170,9 @@ fun WaveUnitsApp() {
                 }
 
                 if (results.isEmpty()) {
-                    Toast.makeText(context, "No sheets were graded", Toast.LENGTH_LONG).show()
-                    isGrading = false; return@launch
+                    Toast.makeText(context, "No sheets were graded.", Toast.LENGTH_LONG).show()
+                    isGrading = false
+                    return@launch
                 }
                 db.collection("exams").document(currentProjectId).update("status", "graded")
                 progressText = "Graded ${results.size} papers!"
@@ -1405,11 +1403,7 @@ fun WaveUnitsApp() {
                                 val imgB64 = imageToBase64(context, uri)
 
                                 if (printout.isBlank() || printout.startsWith("ERR")) {
-                                    Toast.makeText(
-                                        context,
-                                        "Transcribe failed: ${printout.take(200)}",
-                                        Toast.LENGTH_LONG
-                                    ).show()
+                                    Toast.makeText(context, "Transcribe failed: ${printout.take(200)}", Toast.LENGTH_LONG).show()
                                 }
 
                                 val studentName = when {
