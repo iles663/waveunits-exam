@@ -405,7 +405,7 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     }
 }
 
-// ===== AI GRADING =====
+// ===== AI GRADING — match by question number, mark what matches =====
 private suspend fun gradeWithAI(
     printout: String,
     aiAnswerSheetText: String,
@@ -421,67 +421,54 @@ private suspend fun gradeWithAI(
             val prompt = """
                 You are grading a student's answer sheet.
 
-                ============================================================
-                INPUT 1 — STUDENT PRINTOUT
-                ============================================================
-                This is a transcription of the student's answer sheet.
-                The student chose one option per question by marking inside a
-                bracket cell on the answer-sheet grid.
+                ## INPUT 1 — STUDENT PRINTOUT
+                A transcription of the student's answer sheet. Each row is one
+                question number with four bracket cells (columns A | B | C | D).
 
-                HOW TO READ THE STUDENT'S ANSWERS — COLUMN RULES:
-                1. Each row is one question, identified by its number.
-                2. The header row gives the column letters (A | B | C | D).
-                3. For each question, look at the four bracket cells.
-                4. If a readable letter (A, B, C, D) is inside a bracket,
-                   that letter is the student's answer.
-                5. If a bracket's contents are unreadable (tick, scribble,
-                   a line drawn through it, or a letter you cannot make out)
-                   BUT a mark is clearly inside that bracket, use the
-                   COLUMN HEADER of that bracket as the answer.
-                6. If two brackets in the same row have readable letters,
-                   choose the LEFTMOST one.
-                7. If no bracket in the row has a letter or a mark, the
-                   student's answer is blank.
+                ## INPUT 2 — ANSWER KEY
+                Each entry is one question number and its correct answer, in
+                a format like: Q7: Answer: B | Topic: ...
 
-                ============================================================
-                INPUT 2 — AI ANSWER SHEET
-                ============================================================
-                This is the correct answer key generated from the question paper.
+                ## HOW TO READ A STUDENT'S ANSWER — COLUMN RULES
+                For each question number:
+                1. Look at the four bracket cells in that row.
+                2. If a readable letter (A/B/C/D) is inside a bracket, that
+                   letter is the student's answer.
+                3. If a bracket has a mark (tick, scribble, line through it)
+                   but the letter is unreadable, use the COLUMN HEADER of
+                   that bracket as the answer.
+                4. If two brackets in the row have readable letters, choose
+                   the LEFTMOST one.
+                5. If no bracket has a letter or a mark, the student's answer
+                   is blank.
 
-                ============================================================
-                TASK
-                ============================================================
-                Go through every question in the answer key.
-                For each question:
-                  - Extract the student's answer from the printout using the
-                    column rules above.
-                  - Compare it to the correct answer.
-                  - Mark it correct or wrong.
+                ## MATCHING RULE — THE ONLY RULE
+                For every question number that appears in the ANSWER KEY:
+                  - If the same question number also appears in the STUDENT
+                    PRINTOUT, mark it.
+                  - If the question number does NOT appear in the printout,
+                    skip it. Do not invent it. Do not pad.
+                Do not worry about totals. Do not try to reach a fixed count.
+                Just mark whatever numbers match between the two inputs.
+                Even if only one question matches, mark that one question.
 
-                ============================================================
-                OUTPUT — ONLY JSON, no markdown, no commentary
-                ============================================================
+                ## OUTPUT — ONLY a JSON object, no markdown, no commentary
                 {
                   "studentName": "$studentName",
-                  "score": 12,
-                  "total": 20,
-                  "percentage": 60.0,
                   "questions": [
-                    {"questionNumber":1,"topic":"Parables","studentAnswer":"A","correctAnswer":"B","isCorrect":false}
+                    {"questionNumber":7,"topic":"Parables","studentAnswer":"A","correctAnswer":"B","isCorrect":false}
                   ]
                 }
 
+                Do NOT include "score", "total", or "percentage" — the app
+                computes those. Just the "questions" array with the matched
+                question numbers.
                 Use "" for a blank student answer.
-                Include every question that appears in the answer key.
 
-                ============================================================
-                STUDENT PRINTOUT
-                ============================================================
+                ## STUDENT PRINTOUT
                 $printout
 
-                ============================================================
-                AI ANSWER SHEET
-                ============================================================
+                ## ANSWER KEY
                 $aiAnswerSheetText
             """.trimIndent()
 
@@ -500,18 +487,29 @@ private suspend fun gradeWithAI(
 
             client.newCall(req).execute().use { res ->
                 val js = res.body?.string() ?: return@use null
-                android.util.Log.e("WAVEUNITS", "gradeWithAI HTTP ${res.code}: ${js.take(600)}")
                 if (!res.isSuccessful) return@use null
+
                 val txt = JSONObject(js).getJSONArray("choices").getJSONObject(0)
-                    .getJSONObject("message").getString("content")
+                    .getJSONObject("message").getString("content").trim()
+
+                // Tolerant parse: accept object or array, strip code fences.
                 var clean = txt.replace("```json", "").replace("```", "").trim()
-                val s = clean.indexOf('{'); val e = clean.lastIndexOf('}')
-                if (s >= 0 && e > s) clean = clean.substring(s, e + 1)
+
+                val firstBrace = clean.indexOf('{')
+                val firstBracket = clean.indexOf('[')
+                if (firstBracket >= 0 && (firstBrace < 0 || firstBracket < firstBrace)) {
+                    val endBracket = clean.lastIndexOf(']')
+                    if (endBracket > firstBracket) {
+                        val arr = JSONArray(clean.substring(firstBracket, endBracket + 1))
+                        clean = JSONObject().put("questions", arr).toString()
+                    }
+                } else {
+                    val s = clean.indexOf('{'); val e = clean.lastIndexOf('}')
+                    if (s >= 0 && e > s) clean = clean.substring(s, e + 1)
+                }
+
                 val o = JSONObject(clean)
                 val name = o.optString("studentName", studentName)
-                val score = o.optInt("score", 0)
-                val total = o.optInt("total", 0)
-                val pct = o.optDouble("percentage", if (total > 0) score * 100.0 / total else 0.0)
                 val qa = o.optJSONArray("questions") ?: JSONArray()
                 val qs = mutableListOf<QuestionResultData>()
                 for (i in 0 until qa.length()) {
@@ -524,10 +522,14 @@ private suspend fun gradeWithAI(
                         q.optBoolean("isCorrect", false)
                     ))
                 }
-                StudentResult(name, score, total, pct, qs)
+                if (qs.isEmpty()) return@use null
+
+                val correct = qs.count { it.isCorrect }
+                val total = qs.size
+                val pct = if (total > 0) correct * 100.0 / total else 0.0
+                StudentResult(name, correct, total, pct, qs)
             }
         } catch (e: Exception) {
-            android.util.Log.e("WAVEUNITS", "gradeWithAI exception: ${e.message}")
             null
         }
     }
@@ -1084,7 +1086,6 @@ fun WaveUnitsApp() {
                 isGrading = true
                 progressText = "Grading ${collectedStudentAnswerSheets.size} sheets..."
 
-                // Pre-flight: AI answer sheet must exist
                 var aiSheetForGrading = aiAnswerSheet
                 if (aiSheetForGrading.isBlank()) {
                     val doc = db.collection("exams").document(currentProjectId).get().await()
@@ -1096,14 +1097,12 @@ fun WaveUnitsApp() {
                     return@launch
                 }
 
-                // Pre-flight: collected sheets must exist
                 if (collectedStudentAnswerSheets.isEmpty()) {
                     isGrading = false
                     Toast.makeText(context, "Cannot grade: no collected answer sheets yet.", Toast.LENGTH_LONG).show()
                     return@launch
                 }
 
-                // Pre-flight: at least one sheet has a usable printout
                 val gradable = collectedStudentAnswerSheets.filter {
                     it.studentName.isNotBlank() &&
                     it.studentName != "Unknown" &&
