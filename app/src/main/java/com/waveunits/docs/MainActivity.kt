@@ -38,7 +38,6 @@ import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInClient
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
-import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.ktx.auth
 import com.google.firebase.firestore.ktx.firestore
@@ -283,31 +282,6 @@ fun generateStudentComparisons(leaderboard: List<StudentPerformance>): List<Stud
     return comparisons
 }
 
-fun generateMarkedAnswerSheetText(
-    studentName: String,
-    studentAnswers: Map<Int, String>,
-    answerKeyMap: Map<Int, String>
-): String {
-    val sb = StringBuilder()
-    sb.append("STUDENT: $studentName\n")
-    sb.append("--------------------------------\n")
-    var correct = 0
-    val allQ = (answerKeyMap.keys + studentAnswers.keys).toSortedSet()
-    for (q in allQ) {
-        val correctAns = answerKeyMap[q] ?: ""
-        val stuAns = studentAnswers[q] ?: ""
-        val ok = stuAns.isNotBlank() && stuAns == correctAns
-        if (ok) correct++
-        val status = if (ok) "[CORRECT]" else "[WRONG]"
-        sb.append("Q$q: Student: ${stuAns.ifBlank { "[BLANK]" }} | Correct: $correctAns | $status\n")
-    }
-    val total = allQ.size
-    val pct = if (total > 0) (correct.toDouble() / total) * 100 else 0.0
-    sb.append("--------------------------------\n")
-    sb.append("Score: $correct/$total (${"%.1f".format(pct)}%) | Grade: ${getKenyanGrade(pct)}\n")
-    return sb.toString()
-}
-
 fun generatePrintableMarkedSheets(markedSheets: List<MarkedAnswerSheetData>): String {
     val sb = StringBuilder()
     sb.append("========================================\n")
@@ -411,7 +385,7 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     }
 }
 
-// ===== AI GRADING — match by question number, line format =====
+// ===== AI GRADING — free-form reply, stored verbatim =====
 private suspend fun gradeWithAI(
     printout: String,
     aiAnswerSheetText: String,
@@ -425,34 +399,43 @@ private suspend fun gradeWithAI(
                 .build()
 
             val prompt = """
-                Grade the student's answer sheet.
+                You are grading a student's answer sheet.
 
-                RULES:
-                - The student printout shows one row per question, with bracket cells
-                  under columns A | B | C | D.
-                - The student's answer is the letter inside a bracket in that row.
-                  If a bracket has a mark but the letter is unclear, use the column
-                  header (A/B/C/D) as the answer.
-                  If two brackets have letters, use the leftmost.
-                  If nothing is marked, the answer is blank.
-                - The answer key shows the correct answer for each question.
-                - Match by QUESTION NUMBER only. If a number appears in both the
-                  answer key and the printout, grade it. If a number appears in
-                  only one, skip it. Never invent a number. Never pad.
+                ## INPUT 1 — STUDENT PRINTOUT
+                A transcription of the student's answer sheet. Each row is a
+                question number with bracket cells under columns A | B | C | D.
+                The student marked the chosen column by writing a letter inside
+                the bracket. If a mark is there but the letter is unclear, use
+                the column header (A/B/C/D) as the answer. If nothing is marked,
+                the answer is blank.
 
-                OUTPUT FORMAT — one line per graded question, nothing else:
-                Q<number>|<studentAnswer>|<correctAnswer>|<C or W>
+                ## INPUT 2 — ANSWER KEY
+                The correct answer for each question.
 
-                Example:
-                Q1|A|B|W
-                Q7||C|W
-                Q12|C|C|C
+                ## TASK
+                Match by QUESTION NUMBER. For each question that appears in
+                BOTH the printout and the answer key, compare the student's
+                answer to the correct answer.
 
-                Use one uppercase letter A/B/C/D for studentAnswer and correctAnswer.
-                Use "" between pipes for a blank student answer.
-                Write C at the end if correct, W if wrong.
-                Do not write anything before, between, or after these lines.
-                No JSON. No markdown. No commentary.
+                ## OUTPUT
+                Write the result in any clear, human-readable format. For
+                example, one line per question:
+
+                Q1: Student chose A, correct answer is B ? WRONG
+                Q2: Student chose C, correct answer is C ? CORRECT
+                Q3: Student chose B, correct answer is A ? WRONG
+
+                Or a table. Or JSON. Or any other readable form. Just make it
+                clear which question is which, what the student chose, what
+                the correct answer is, and whether it was correct.
+
+                At the very end, on its own line, write:
+                SCORE: <number correct> / <total>
+                PERCENTAGE: <number>%
+                GRADE: <letter>
+
+                Do not skip any question that appears in both inputs.
+                Do not invent questions that are not in the inputs.
 
                 ===== STUDENT PRINTOUT =====
                 $printout
@@ -480,25 +463,27 @@ private suspend fun gradeWithAI(
 
                 val txt = JSONObject(js).getJSONArray("choices").getJSONObject(0)
                     .getJSONObject("message").getString("content").trim()
+                if (txt.isBlank()) return@use null
 
-                val qs = mutableListOf<QuestionResultData>()
-                val lineRegex = Regex("""Q\s*(\d+)\s*\|\s*([A-Da-d]?)\s*\|\s*([A-Da-d]?)\s*\|\s*([CWcw])""")
-                for (line in txt.lines()) {
-                    val m = lineRegex.find(line.trim()) ?: continue
-                    val num = m.groupValues[1].toIntOrNull() ?: continue
-                    val stu = m.groupValues[2].uppercase().take(1)
-                    val cor = m.groupValues[3].uppercase().take(1)
-                    val isC = m.groupValues[4].uppercase() == "C"
-                    qs.add(QuestionResultData(num, "General", stu, cor, isC))
+                var score = 0
+                var total = 0
+                var pct = 0.0
+
+                val scoreRegex = Regex("""SCORE\s*:\s*(\d+)\s*/\s*(\d+)""", RegexOption.IGNORE_CASE)
+                scoreRegex.find(txt)?.let {
+                    score = it.groupValues[1].toIntOrNull() ?: 0
+                    total = it.groupValues[2].toIntOrNull() ?: 0
+                    if (total > 0) pct = score * 100.0 / total
                 }
 
-                if (qs.isEmpty()) return@use null
-
-                val sorted = qs.sortedBy { it.questionNumber }
-                val correct = sorted.count { it.isCorrect }
-                val total = sorted.size
-                val pct = if (total > 0) correct * 100.0 / total else 0.0
-                StudentResult(studentName, correct, total, pct, sorted)
+                val single = QuestionResultData(
+                    questionNumber = 0,
+                    topic = "ai-text",
+                    studentAnswer = txt,
+                    correctAnswer = "",
+                    isCorrect = score > 0
+                )
+                StudentResult(studentName, score, total, pct, listOf(single))
             }
         } catch (e: Exception) {
             null
@@ -719,10 +704,9 @@ fun WaveUnitsApp() {
     val context = LocalContext.current
     val activity = context as Activity
 
-    // Google Sign-In client
     val gso = remember {
         GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
-         .requestIdToken("705925410232-d010rgrfnp8o755007sakn8u1b4ndorp.apps.googleusercontent.com")
+            .requestIdToken("705925410232-d010rgrfnp8o755007sakn8u1b4ndorp.apps.googleusercontent.com")
             .requestEmail()
             .build()
     }
@@ -781,7 +765,6 @@ fun WaveUnitsApp() {
             .putString("email", email).putString("password", password).apply()
     }
 
-    // Google Sign-In launcher
     val googleLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -809,7 +792,6 @@ fun WaveUnitsApp() {
     }
 
     LaunchedEffect(Unit) {
-        // Auto-login if Firebase has a current user
         val cu = auth.currentUser
         if (cu != null) {
             isLoggedIn = true
@@ -1145,9 +1127,12 @@ fun WaveUnitsApp() {
                     }
 
                     results.add(result)
-                    val studentAnswers = result.questions.associate { it.questionNumber to it.studentAnswer }
-                    val answerKeyMap = result.questions.associate { it.questionNumber to it.correctAnswer }
-                    val markedText = generateMarkedAnswerSheetText(sheet.studentName, studentAnswers, answerKeyMap)
+
+                    val aiText = result.questions.firstOrNull()?.studentAnswer ?: ""
+                    val markedText = "STUDENT: ${sheet.studentName}\n" +
+                                     "--------------------------------\n" +
+                                     aiText +
+                                     "\n--------------------------------\n"
                     marked.add(MarkedAnswerSheetData(sheet.studentName, markedText, sheet.image, result.score, result.totalMarks, result.percentage))
 
                     db.collection("exams").document(currentProjectId).collection("markedSheets").add(mapOf(
@@ -1160,27 +1145,10 @@ fun WaveUnitsApp() {
                         "studentName" to sheet.studentName,
                         "examId" to currentProjectId, "examTitle" to currentProjectTitle,
                         "score" to result.score, "totalMarks" to result.totalMarks, "percentage" to result.percentage,
-                        "gradedBy" to "ai-printout-vs-answer-sheet",
+                        "gradedBy" to "ai-freeform",
                         "rawText" to sheet.extractedText,
-                        "questions" to result.questions.map { q -> mapOf(
-                            "questionNumber" to q.questionNumber, "topic" to q.topic,
-                            "studentAnswer" to q.studentAnswer, "correctAnswer" to q.correctAnswer,
-                            "isCorrect" to q.isCorrect) },
+                        "questions" to emptyList<Map<String, Any>>(),
                         "createdAt" to System.currentTimeMillis()
-                    ))
-
-                    val portfolioRef = db.collection("portfolios")
-                        .document("${auth.currentUser?.uid}_${sheet.studentName}")
-                    val existing = portfolioRef.get().await()
-                    val examCount = (existing.getLong("examsTaken") ?: 0) + 1
-                    val totalScore = (existing.getDouble("totalScore") ?: 0.0) + result.percentage
-                    portfolioRef.set(mapOf(
-                        "teacherId" to auth.currentUser?.uid,
-                        "studentName" to sheet.studentName,
-                        "averageScore" to (totalScore / examCount),
-                        "examsTaken" to examCount, "totalScore" to totalScore,
-                        "weakTopics" to result.questions.filter { !it.isCorrect }.map { it.topic }.distinct(),
-                        "strongTopics" to result.questions.filter { it.isCorrect }.map { it.topic }.distinct()
                     ))
                 }
 
@@ -1192,7 +1160,6 @@ fun WaveUnitsApp() {
                 db.collection("exams").document(currentProjectId).update("status", "graded")
                 progressText = "Graded ${results.size} papers!"
                 isGrading = false
-                loadAdvancedAnalytics()
                 showMarkingResults = true
                 markedAnswerSheets = marked
                 Toast.makeText(context, "Graded ${results.size}", Toast.LENGTH_SHORT).show()
@@ -1317,7 +1284,6 @@ fun WaveUnitsApp() {
                             val newSimp = parseAISheetToSimplified(newAI)
                             simplifiedAnswerKey = if (simplifiedAnswerKey.isBlank()) newSimp else "$simplifiedAnswerKey,$newSimp"
                             answerKey = simplifiedAnswerKey
-                            // ? Auto-save everything
                             db.collection("exams").document(currentProjectId).update(mapOf(
                                 "questionPaperImages" to newImages,
                                 "allQuestionTexts" to newTexts,
@@ -1340,7 +1306,6 @@ fun WaveUnitsApp() {
                             val newKey = parsed.joinToString(",") { "${it.first}:${it.second}" }
                             manualAnswerKey = if (manualAnswerKey.isBlank()) newKey else "$manualAnswerKey,$newKey"
                             answerKey = manualAnswerKey
-                            // ? Auto-save
                             db.collection("exams").document(currentProjectId).update(mapOf(
                                 "manualAnswerSheet" to manualAnswerSheetText,
                                 "manualAnswerKey" to manualAnswerKey,
@@ -1376,7 +1341,6 @@ fun WaveUnitsApp() {
                                     image = imgB64
                                 ))
                             }
-                            // ? Auto-save collected sheets
                             val newCollected = collectedStudentAnswerSheets + newSheets
                             val sheetsData = newCollected.map { s ->
                                 mapOf("studentName" to s.studentName,
@@ -1433,7 +1397,6 @@ fun WaveUnitsApp() {
                     Text("WaveUnits", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                     Spacer(modifier = Modifier.height(32.dp))
 
-                    // ? Google Sign-In
                     Button(
                         onClick = {
                             val signInIntent = googleSignInClient.signInIntent
