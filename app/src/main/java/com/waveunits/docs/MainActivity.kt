@@ -233,17 +233,6 @@ fun parseAISheetToSimplified(aiAnswerSheet: String): String {
     return answers.joinToString(",")
 }
 
-fun parseAnswerKeyToMap(answerKeyString: String): Map<Int, String> {
-    val map = mutableMapOf<Int, String>()
-    if (answerKeyString.isBlank()) return map
-    val pattern = Regex("""(\d+)\s*:\s*([A-Da-d])""")
-    for (match in pattern.findAll(answerKeyString)) {
-        val qNum = match.groupValues[1].toIntOrNull() ?: continue
-        map[qNum] = match.groupValues[2].uppercase()
-    }
-    return map
-}
-
 fun getKenyanGrade(percentage: Double): String = when {
     percentage >= 75.0 -> "A"
     percentage >= 70.0 -> "A-"
@@ -410,12 +399,11 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     }
 }
 
-// ===== AI: GRADING — printout + answer key + column rules, single call =====
+// ===== AI GRADING: printout + AI answer sheet, one call =====
 private suspend fun gradeWithAI(
     printout: String,
-    answerKeyText: String,
-    studentName: String,
-    answerKeySize: Int
+    aiAnswerSheetText: String,
+    studentName: String
 ): StudentResult? {
     return withContext(Dispatchers.IO) {
         try {
@@ -427,51 +415,69 @@ private suspend fun gradeWithAI(
             val prompt = """
                 You are grading a student's answer sheet.
 
-                ## INPUT 1 — STUDENT PRINTOUT
-                This is a transcription of the student's answer sheet. It shows a table.
-                The header row gives the column letters (usually A | B | C | D).
-                Each numbered row is one question, with one bracket cell per column.
+                ============================================================
+                INPUT 1 — STUDENT PRINTOUT
+                ============================================================
+                This is a transcription of the student's answer sheet. The
+                student chose one option per question by marking inside a
+                bracket cell, on the answer sheet grid.
 
-                HOW TO READ THE STUDENT'S ANSWER FOR EACH ROW (QUESTION):
-                1. If a readable letter is inside a bracket, that letter is the answer.
-                2. If a bracket's contents are unreadable (scribble, tick, line drawn
-                   through it, or a letter that cannot be made out) BUT a mark is
-                   clearly inside that bracket, use the COLUMN HEADER of that bracket
-                   as the answer. The column header is the fallback source of truth.
-                3. If two brackets in the same row have readable letters, choose the
-                   LEFTMOST one.
-                4. If no bracket in the row has a letter or a mark, the student answer
-                   is blank (use an empty string).
+                HOW TO READ THE STUDENT'S ANSWERS — COLUMN RULES:
+                1. Each row is one question, identified by its number.
+                2. The header row gives the column letters (A | B | C | D).
+                3. For each question, look at the four bracket cells.
+                4. If a readable letter (A, B, C, D) is inside a bracket,
+                   that letter is the student's answer.
+                5. If a bracket's contents are unreadable (tick, scribble, a
+                   line drawn through it, or a letter you cannot make out)
+                   BUT a mark is clearly inside that bracket, use the
+                   COLUMN HEADER of that bracket as the answer. The column
+                   header is the fallback source of truth.
+                6. If two brackets in the same row have readable letters,
+                   choose the LEFTMOST one.
+                7. If no bracket in that row has a letter or a mark, the
+                   student's answer is blank.
 
-                ## INPUT 2 — ANSWER KEY
-                Each line looks like: Q1: Answer: B | Topic: ... | Sub-topic: ...
+                ============================================================
+                INPUT 2 — AI ANSWER SHEET
+                ============================================================
+                This is the correct answer key generated from the question paper.
 
-                ## TASK
-                For every question in the answer key:
-                - Read the student's answer from the printout using the rules above.
-                - Compare it to the correct answer from the key.
-                - Mark it correct or wrong.
-                Then produce the score and total.
+                ============================================================
+                TASK
+                ============================================================
+                Go through every question in the answer key.
+                For each question:
+                  - Extract the student's answer from the printout using the
+                    column rules above.
+                  - Compare it to the correct answer.
+                  - Mark it correct or wrong.
 
-                ## OUTPUT (ONLY JSON — no markdown, no explanation, no code fences)
+                ============================================================
+                OUTPUT — ONLY JSON, no markdown, no commentary
+                ============================================================
                 {
                   "studentName": "$studentName",
                   "score": 12,
-                  "total": $answerKeySize,
+                  "total": 20,
                   "percentage": 60.0,
                   "questions": [
                     {"questionNumber":1,"topic":"Parables","studentAnswer":"A","correctAnswer":"B","isCorrect":false}
                   ]
                 }
 
-                Cover ALL question numbers 1 through $answerKeySize.
                 Use "" for a blank student answer.
+                Include every question that appears in the answer key.
 
-                ## STUDENT PRINTOUT
+                ============================================================
+                STUDENT PRINTOUT
+                ============================================================
                 $printout
 
-                ## ANSWER KEY
-                $answerKeyText
+                ============================================================
+                AI ANSWER SHEET
+                ============================================================
+                $aiAnswerSheetText
             """.trimIndent()
 
             val body = JSONObject()
@@ -490,19 +496,19 @@ private suspend fun gradeWithAI(
             client.newCall(req).execute().use { res ->
                 val js = res.body?.string() ?: return@use null
                 if (!res.isSuccessful) {
-                    android.util.Log.e("WAVEUNITS", "Grade HTTP ${res.code}: ${js.take(400)}")
+                    android.util.Log.e("WAVEUNITS", "Grade HTTP ${res.code}: ${js.take(500)}")
                     return@use null
                 }
                 val txt = JSONObject(js).getJSONArray("choices").getJSONObject(0)
                     .getJSONObject("message").getString("content")
-                android.util.Log.d("WAVEUNITS", "Grade raw: ${txt.take(400)}")
+                android.util.Log.d("WAVEUNITS", "Grade raw: ${txt.take(500)}")
                 var clean = txt.replace("```json", "").replace("```", "").trim()
                 val s = clean.indexOf('{'); val e = clean.lastIndexOf('}')
                 if (s >= 0 && e > s) clean = clean.substring(s, e + 1)
                 val o = JSONObject(clean)
                 val name = o.optString("studentName", studentName)
                 val score = o.optInt("score", 0)
-                val total = o.optInt("total", answerKeySize)
+                val total = o.optInt("total", 0)
                 val pct = o.optDouble("percentage", if (total > 0) score * 100.0 / total else 0.0)
                 val qa = o.optJSONArray("questions") ?: JSONArray()
                 val qs = mutableListOf<QuestionResultData>()
@@ -523,35 +529,6 @@ private suspend fun gradeWithAI(
             null
         }
     }
-}
-
-// ===== Local regex fallback (no AI) — used only if gradeWithAI returns null =====
-private fun extractAnswersFromPrintoutRegex(printout: String): Map<Int, String> {
-    val answers = mutableMapOf<Int, String>()
-    if (printout.isBlank()) return answers
-
-    val rowRegex = Regex("""\|\s*(\d{1,3})\s*\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|""")
-    for (m in rowRegex.findAll(printout)) {
-        val qNum = m.groupValues[1].toIntOrNull() ?: continue
-        if (qNum < 1 || qNum > 200) continue
-        val cells = listOf(m.groupValues[2], m.groupValues[3], m.groupValues[4], m.groupValues[5])
-        val letters = listOf("A", "B", "C", "D")
-        var found: String? = null
-        for (cell in cells) {
-            val inner = cell.replace("[", "").replace("]", "").trim().uppercase()
-            if (inner.length == 1 && inner in letters) { found = inner; break }
-        }
-        if (found != null) answers[qNum] = found
-    }
-
-    if (answers.isEmpty()) {
-        val loose = Regex("""(?m)^\s*(\d{1,3})\s*[.:\-]?\s*([A-Da-d])\b""")
-        for (m in loose.findAll(printout)) {
-            val q = m.groupValues[1].toIntOrNull() ?: continue
-            if (q in 1..200) answers[q] = m.groupValues[2].uppercase()
-        }
-    }
-    return answers
 }
 
 // ===== AI: QUESTION PAPER / ANSWER KEY GENERATION =====
@@ -1109,22 +1086,26 @@ fun WaveUnitsApp() {
                 isGrading = true
                 progressText = "Grading ${collectedStudentAnswerSheets.size} sheets..."
 
-                if (answerKey.isBlank()) {
+                // Get the AI answer sheet text (Full: block) from Firestore if not in memory
+                var aiSheetForGrading = aiAnswerSheet
+                if (aiSheetForGrading.isBlank()) {
                     val doc = db.collection("exams").document(currentProjectId).get().await()
-                    answerKey = doc.getString("answerKey") ?: doc.getString("simplifiedAnswerKey") ?: ""
+                    aiSheetForGrading = doc.getString("aiAnswerSheet") ?: ""
                 }
-                val answerKeyMap = parseAnswerKeyToMap(answerKey)
-                if (answerKeyMap.isEmpty()) {
-                    Toast.makeText(context, "No answer key", Toast.LENGTH_LONG).show()
+                if (aiSheetForGrading.isBlank()) {
+                    Toast.makeText(context, "No AI answer sheet found. Please scan the question paper first.", Toast.LENGTH_LONG).show()
                     isGrading = false; return@launch
                 }
 
                 val results = mutableListOf<StudentResult>()
                 val marked = mutableListOf<MarkedAnswerSheetData>()
-                val maxQ = answerKeyMap.keys.maxOrNull() ?: 50
 
                 for (sheet in collectedStudentAnswerSheets) {
                     if (sheet.studentName.isBlank() || sheet.studentName == "Unknown") continue
+                    if (sheet.extractedText.isBlank()) {
+                        Toast.makeText(context, "Skipping ${sheet.studentName}: empty printout", Toast.LENGTH_LONG).show()
+                        continue
+                    }
                     if (sheet.extractedText.startsWith("ERR")) {
                         Toast.makeText(context, "Skipping ${sheet.studentName}: ${sheet.extractedText.take(120)}", Toast.LENGTH_LONG).show()
                         continue
@@ -1132,29 +1113,8 @@ fun WaveUnitsApp() {
 
                     progressText = "Grading ${sheet.studentName}..."
 
-                    // ? AI grading: printout + answer key + column rules in one call
-                    var result = gradeWithAI(sheet.extractedText, answerKey, sheet.studentName, maxQ)
-
-                    // Fallback: local regex extraction + local compare (only if AI failed)
-                    if (result == null || result.questions.isEmpty()) {
-                        val localAnswers = extractAnswersFromPrintoutRegex(sheet.extractedText)
-                        if (localAnswers.isNotEmpty()) {
-                            val allQ = (answerKeyMap.keys + localAnswers.keys).toSortedSet()
-                            var score = 0
-                            val qs = mutableListOf<QuestionResultData>()
-                            for (q in allQ) {
-                                val correct = answerKeyMap[q] ?: ""
-                                val stu = localAnswers[q] ?: ""
-                                val ok = stu.isNotBlank() && stu == correct
-                                if (ok) score++
-                                qs.add(QuestionResultData(q, "General", stu, correct, ok))
-                            }
-                            val total = allQ.size
-                            val pct = if (total > 0) (score.toDouble() / total) * 100 else 0.0
-                            result = StudentResult(sheet.studentName, score, total, pct, qs)
-                            Toast.makeText(context, "Used local fallback for ${sheet.studentName}", Toast.LENGTH_SHORT).show()
-                        }
-                    }
+                    // ? Send printout + AI answer sheet to AI. It applies the column rules and grades.
+                    val result = gradeWithAI(sheet.extractedText, aiSheetForGrading, sheet.studentName)
 
                     if (result == null || result.questions.isEmpty()) {
                         Toast.makeText(context, "Grading failed for ${sheet.studentName}", Toast.LENGTH_LONG).show()
@@ -1162,7 +1122,10 @@ fun WaveUnitsApp() {
                     }
 
                     results.add(result)
+
+                    // Build a marked-sheet text using the AI's per-question results
                     val studentAnswers = result.questions.associate { it.questionNumber to it.studentAnswer }
+                    val answerKeyMap = result.questions.associate { it.questionNumber to it.correctAnswer }
                     val markedText = generateMarkedAnswerSheetText(sheet.studentName, studentAnswers, answerKeyMap)
                     marked.add(MarkedAnswerSheetData(sheet.studentName, markedText, sheet.image, result.score, result.totalMarks, result.percentage))
 
@@ -1176,7 +1139,7 @@ fun WaveUnitsApp() {
                         "studentName" to sheet.studentName,
                         "examId" to currentProjectId, "examTitle" to currentProjectTitle,
                         "score" to result.score, "totalMarks" to result.totalMarks, "percentage" to result.percentage,
-                        "gradedBy" to "ai-printout",
+                        "gradedBy" to "ai-printout-column-rules",
                         "rawText" to sheet.extractedText,
                         "questions" to result.questions.map { q -> mapOf(
                             "questionNumber" to q.questionNumber, "topic" to q.topic,
@@ -1201,7 +1164,7 @@ fun WaveUnitsApp() {
                 }
 
                 if (results.isEmpty()) {
-                    Toast.makeText(context, "No valid students", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "No sheets were graded", Toast.LENGTH_LONG).show()
                     isGrading = false; return@launch
                 }
                 db.collection("exams").document(currentProjectId).update("status", "graded")
