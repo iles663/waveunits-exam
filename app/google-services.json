@@ -12,7 +12,12 @@
           "package_name": "com.waveunits.app"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "705925410232-d010rgrfnp8o755007sakn8u1b4ndorp.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDmK3Cv3cs9gwqa8mhXqT85C_VIT82gxx4"
@@ -23,7 +28,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "705925410232-d010rgrfnp8o755007sakn8u1b4ndorp.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     },
@@ -34,7 +44,28 @@
           "package_name": "com.waveunits.docs"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "705925410232-eqhmds681qn7o405l62daau9n72o1p4k.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.waveunits.docs",
+            "certificate_hash": "011c357e71fd13181826a4eaff6ea9ae92f27659"
+          }
+        },
+        {
+          "client_id": "705925410232-qb2i4os69qvme6ofs0n1hrsjo0l72qtn.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.waveunits.docs",
+            "certificate_hash": "0f30b169bebca4c539c39083c0335d66ff7bc8d0"
+          }
+        },
+        {
+          "client_id": "705925410232-d010rgrfnp8o755007sakn8u1b4ndorp.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDmK3Cv3cs9gwqa8mhXqT85C_VIT82gxx4"
@@ -45,7 +76,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "705925410232-d010rgrfnp8o755007sakn8u1b4ndorp.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     },
@@ -56,7 +92,12 @@
           "package_name": "com.waveunits.marker"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "705925410232-d010rgrfnp8o755007sakn8u1b4ndorp.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDmK3Cv3cs9gwqa8mhXqT85C_VIT82gxx4"
@@ -67,7 +108,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "705925410232-d010rgrfnp8o755007sakn8u1b4ndorp.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }
