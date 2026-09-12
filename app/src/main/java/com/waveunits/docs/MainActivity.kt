@@ -443,7 +443,6 @@ private suspend fun gradeWithAI(
             .put("model", "gpt-5.6-luna")
             .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
             .put("max_completion_tokens", 4000)
-            .put("temperature", 0.0)
             .toString()
 
         val req = Request.Builder()
