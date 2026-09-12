@@ -28,6 +28,9 @@ jobs:
       - name: Build APK
         run: ./gradlew assembleDebug --no-daemon
 
+      - name: Print SHA-1
+        run: ./gradlew signingReport
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
