@@ -385,7 +385,7 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     }
 }
 
-// ===== AI GRADING — free-form reply, stored verbatim =====
+// ===== AI GRADING — grid-aware, free-form reply stored verbatim =====
 private suspend fun gradeWithAI(
     printout: String,
     aiAnswerSheetText: String,
@@ -398,41 +398,48 @@ private suspend fun gradeWithAI(
             .build()
 
         val prompt = """
-            You are grading a student's answer sheet.
+            TASK: Grade a student's answer sheet by reading a GRID.
 
-            ## INPUT 1 — STUDENT PRINTOUT
-            A transcription of the student's answer sheet. Each row is a
-            question number with bracket cells under columns A | B | C | D.
-            The student marked the chosen column by writing a letter inside
-            the bracket. If a mark is there but the letter is unclear, use
-            the column header (A/B/C/D) as the answer. If nothing is marked,
-            the answer is blank.
+            The printout below is NOT prose. It is a TABLE. Every row starts with a
+            question number, followed by FOUR BRACKET CELLS. The four cells
+            correspond, in order, to four columns: A, B, C, D.
 
-            ## INPUT 2 — ANSWER KEY
-            The correct answer for each question.
+            RULE FOR READING THE STUDENT'S ANSWER ON EACH ROW:
+            - Look ONLY at the four bracket cells on that row.
+            - If the FIRST bracket cell contains a letter, the answer is that letter.
+            - If the SECOND bracket cell contains a letter, the answer is that letter.
+            - Third cell ? third letter. Fourth cell ? fourth letter.
+            - The letter must be the SAME as the column header of the cell it sits in
+              (e.g. the letter A must be in the A column). If the letter is unreadable
+              but the cell has a mark (tick, line, scribble), use the COLUMN HEADER.
+            - If two cells have letters, take the LEFTMOST one.
+            - If all four cells are empty (no letter, no mark), the student's answer
+              is blank.
 
-            ## TASK
-            Match by QUESTION NUMBER. For each question that appears in
-            BOTH the printout and the answer key, compare the student's
-            answer to the correct answer.
+            HOW TO FIND THE COLUMN OF A CELL
+            - Do NOT search for the letter anywhere on the line. Look only at the
+              four cells of the row.
+            - Example row: `| 7 | [ ] | [ C ] | [ ] | [ ] |`
+              ? cell 1 empty, cell 2 = C, cell 3 empty, cell 4 empty
+              ? student answer for Q7 is C (trust the letter inside the cell).
+            - Example row: `| 7 | [ ] | [ tick ] | [ ] | [ ] |`
+              ? the marked cell is the second cell, whose column header is B
+              ? student answer for Q7 is B (column header fallback).
 
-            ## OUTPUT
-            Write the result in any clear, human-readable format. For
-            example, one line per question:
+            MATCHING RULE:
+            Compare each student answer to the correct answer from the ANSWER KEY
+            below, matched by question number. Only grade questions that appear in
+            BOTH the printout and the answer key. Do not invent questions.
 
-            Q1: Student chose A, correct answer is B ? WRONG
-            Q2: Student chose C, correct answer is C ? CORRECT
-            Q3: Student chose B, correct answer is A ? WRONG
+            OUTPUT:
+            Write one line per graded question, in any readable form, then at the
+            very end write:
 
-            At the very end, on its own line, write:
             SCORE: <number correct> / <total>
             PERCENTAGE: <number>%
             GRADE: <letter>
 
-            Do not skip any question that appears in both inputs.
-            Do not invent questions that are not in the inputs.
-
-            ===== STUDENT PRINTOUT =====
+            ===== STUDENT PRINTOUT (table) =====
             $printout
 
             ===== ANSWER KEY =====
