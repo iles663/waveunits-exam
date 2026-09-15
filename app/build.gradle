@@ -67,10 +67,9 @@ dependencies {
     implementation platform('com.google.firebase:firebase-bom:32.7.0')
     implementation 'com.google.firebase:firebase-auth-ktx'
     implementation 'com.google.firebase:firebase-firestore-ktx'
+    implementation 'com.google.firebase:firebase-config-ktx'
 
-    // Google Sign-In
     implementation 'com.google.android.gms:play-services-auth:21.2.0'
-
     implementation 'com.google.android.gms:play-services-mlkit-document-scanner:16.0.0-beta1'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'

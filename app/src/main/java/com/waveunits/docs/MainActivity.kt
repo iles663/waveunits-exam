@@ -42,6 +42,7 @@ import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.ktx.auth
 import com.google.firebase.firestore.ktx.firestore
 import com.google.firebase.ktx.Firebase
+import com.google.firebase.remoteconfig.ktx.remoteConfig
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
@@ -167,7 +168,8 @@ data class SectionViewState(
     val isAnswerSheetGeneratorOpen: Boolean = false
 )
 
-private const val OPENAI_API_KEY = "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"
+// ===== OpenAI key — loaded from Firebase Remote Config at startup =====
+private var OPENAI_API_KEY: String = ""
 
 // ===== UTILITY FUNCTIONS =====
 fun parseCreatedAt(value: Any?): Long = when (value) {
@@ -706,6 +708,16 @@ fun WaveUnitsApp() {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val activity = context as Activity
+
+    // Load OpenAI key from Remote Config once at startup
+    LaunchedEffect(Unit) {
+        try {
+            val rc = Firebase.remoteConfig
+            rc.fetchAndActivate().await()
+            val k = rc.getString("openai_api_key")
+            if (k.isNotBlank()) OPENAI_API_KEY = k
+        } catch (_: Exception) {}
+    }
 
     val gso = remember {
         GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
