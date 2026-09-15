@@ -418,16 +418,6 @@ private suspend fun gradeWithAI(
             - If all four cells are empty (no letter, no mark), the student's answer
               is blank.
 
-            HOW TO FIND THE COLUMN OF A CELL
-            - Do NOT search for the letter anywhere on the line. Look only at the
-              four cells of the row.
-            - Example row: `| 7 | [ ] | [ C ] | [ ] | [ ] |`
-              ? cell 1 empty, cell 2 = C, cell 3 empty, cell 4 empty
-              ? student answer for Q7 is C (trust the letter inside the cell).
-            - Example row: `| 7 | [ ] | [ tick ] | [ ] | [ ] |`
-              ? the marked cell is the second cell, whose column header is B
-              ? student answer for Q7 is B (column header fallback).
-
             MATCHING RULE:
             Compare each student answer to the correct answer from the ANSWER KEY
             below, matched by question number. Only grade questions that appear in
@@ -563,12 +553,12 @@ private suspend fun generateAIAnswerSheetWithTopics(questions: List<QuestionData
         try {
             val client = OkHttpClient.Builder().build()
             val prompt = """
-                Generate an answer sheet with curriculum topics for each question.
+                Generate an answer sheet with Kenyan CBC curriculum topics for each question.
                 The answer MUST be A, B, C, or D. If unknown, choose A.
                 Questions:
                 ${questions.joinToString("\n") { "Q${it.number}: ${it.topic} - Answer: ${it.correctAnswer}" }}
                 Format:
-                Q1: Answer: D | Topic: Number | Sub-topic: Addition
+                Q1: Answer: D | Topic: Life of Prophets / Messengers | Sub-topic: Parables
             """.trimIndent()
             val body = JSONObject()
                 .put("model", "gpt-5.6-luna")
@@ -600,21 +590,84 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
         try {
             val client = OkHttpClient.Builder().build()
             val prompt = """
-                You are analyzing an exam paper. Extract ALL questions. For each, provide:
+                You are analyzing a Kenyan CBC exam paper. For every question,
+                identify its STRAND and SUB-STRAND from the official KICD
+                rationalized curriculum, and the correct answer.
+
+                Match by MEANING, not by keyword.
+
+                ## CBC LEARNING AREAS AND STRANDS
+
+                English:
+                - Listening and Speaking (subs: Polite expressions, Directions, Debates, Oral presentation)
+                - Reading (subs: Comprehension, Fluency, Extensive reading, Critical reading)
+                - Grammar / Language Structures (subs: Nouns, Verbs, Tenses, Prepositions, Adjectives, Adverbs, Conjunctions, Pronouns, Punctuation)
+                - Writing (subs: Handwriting, Creative writing, Functional writing, Paragraph writing)
+
+                Kiswahili:
+                - Kusikiliza na Kuzungumza (subs: Salamu, Maelekezo, Mazungumzo, Kutoa taarifa)
+                - Kusoma (subs: Ufahamu, Kusoma kwa sauti, Fasihi)
+                - Sarufi (subs: Nomino, Vitenzi, Nyakati, Viunganishi, Ngeli)
+                - Kuandika (subs: Insha, Barua, Muhtasari)
+
+                Mathematics:
+                - Numbers (subs: Counting, Place value, Addition, Subtraction, Multiplication, Division, Fractions, Decimals, Percentages, Ratios, Integers, Algebra, Equations, Patterns)
+                - Measurement (subs: Length, Mass, Capacity, Time, Money, Area, Perimeter, Volume)
+                - Geometry (subs: Shapes, Angles, Lines, Polygons, Coordinates)
+                - Data Handling (subs: Pictographs, Bar graphs, Pie charts, Averages)
+
+                Science and Technology:
+                - Living Things (subs: Plants, Animals, Human body, Health)
+                - Environment (subs: Pollution, Conservation, Weather, Soil)
+                - Matter (subs: States of matter, Mixtures, Acids and bases)
+                - Force and Energy (subs: Simple machines, Energy conversion, Light, Sound)
+
+                Social Studies:
+                - Physical Environment (subs: Map work, Physical features, Climate)
+                - People and Population (subs: Communities, Migration)
+                - Resources and Economic Activities (subs: Agriculture, Mining, Forestry, Trade)
+                - Citizenship (subs: Rights, Governance, National unity)
+
+                Agriculture and Nutrition:
+                - Food Production (subs: Crops, Livestock, Kitchen garden)
+                - Conservation (subs: Soil, Water)
+                - Consumer Education (subs: Food safety, Cooking, Nutrition)
+                - Needlework (subs: Stitches, Garment making)
+
+                Creative Arts:
+                - Visual Arts (subs: Drawing, Painting, Modelling, Craft)
+                - Music (subs: Singing, Instruments, Rhythm, Composition)
+                - Performing Arts (subs: Dance, Drama, Puppetry)
+                - Physical Education (subs: Athletics, Ball games, Gymnastics)
+
+                Religious Education (CRE / IRE / HRE):
+                - Creation (subs: God's creation, Family, Environment)
+                - Holy Books (subs: Scripture, Commandments)
+                - Life of Prophets / Messengers (subs: Prophets, Miracles, Parables)
+                - Values (subs: Love, Honesty, Obedience, Sharing, Integrity)
+
+                ## TASK
+                For EACH question in the paper, return:
                 - number (integer)
-                - topic: a short topic based on the actual subject of the paper.
-                  Infer the subject from the paper text itself.
-                - subTopic: a shorter sub-topic
-                - correctAnswer: MUST be A, B, C, or D. Never null. If unknown, choose A.
+                - learningArea (the top-level learning area, e.g. "Religious Education", "Mathematics")
+                - strand (one of the strands above, exactly as written)
+                - subStrand (one of the sub-strands above, exactly as written)
+                - correctAnswer (MUST be A, B, C, or D. Never null. If unknown, choose A.)
+
+                If a question clearly does not fit any listed strand, choose the
+                closest one and add "(General)" to the subStrand. Do NOT invent
+                new strands or sub-strands that aren't in the list.
+
                 Return ONLY JSON:
-                [{"number":1,"topic":"Parables","subTopic":"Talents","correctAnswer":"D"}, ...]
+                [{"number":1,"learningArea":"Religious Education","strand":"Life of Prophets / Messengers","subStrand":"Parables","correctAnswer":"D"}, ...]
+
                 Question paper:
                 $rawText
             """.trimIndent()
             val body = JSONObject()
                 .put("model", "gpt-5.6-luna")
                 .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
-                .put("max_completion_tokens", 4000)
+                .put("max_completion_tokens", 6000)
                 .toString()
             val req = Request.Builder()
                 .url("https://api.openai.com/v1/chat/completions")
@@ -634,11 +687,14 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
                     val o = arr.getJSONObject(i)
                     val answer = o.optString("correctAnswer", "A").uppercase().take(1)
                     val safe = if (answer in listOf("A", "B", "C", "D")) answer else "A"
+                    val strand = o.optString("strand", "General")
+                    val subStrand = o.optString("subStrand", "General")
+                    val topic = if (subStrand.isBlank() || subStrand == "General") strand else "$strand ? $subStrand"
                     qs.add(QuestionData(
                         number = o.getInt("number"),
-                        topic = o.optString("topic", "General"),
+                        topic = topic,
                         correctAnswer = safe,
-                        subTopic = o.optString("subTopic", "")
+                        subTopic = subStrand
                     ))
                 }
                 qs
@@ -709,7 +765,6 @@ fun WaveUnitsApp() {
     val context = LocalContext.current
     val activity = context as Activity
 
-    // Load OpenAI key from Remote Config once at startup
     LaunchedEffect(Unit) {
         try {
             val rc = Firebase.remoteConfig
@@ -1014,7 +1069,7 @@ fun WaveUnitsApp() {
                         questions = questionsData.map { q ->
                             QuestionResultData(
                                 (q["questionNumber"] as? Number)?.toInt() ?: 0,
-                                q["topic"] as? String ?: "",
+                                q["topic"] as? String ?: "General",
                                 q["studentAnswer"] as? String ?: "",
                                 q["correctAnswer"] as? String ?: "",
                                 q["isCorrect"] as? Boolean ?: false
@@ -1062,10 +1117,22 @@ fun WaveUnitsApp() {
                     e.second.add(q.isCorrect)
                 }
                 val qBreakdown = qMap.map { (num, pair) ->
-                    val cc = pair.second.count { it }; val tc = pair.second.size
-                    val acc = if (tc > 0) cc.toDouble() / tc else 0.0
-                    QuestionBreakdown(num, pair.first, cc, tc,
-                        when { acc >= 0.8 -> "Easy"; acc >= 0.5 -> "Moderate"; else -> "Hard" })
+                    val correctCount = pair.second.count { it }
+                    val totalCount = pair.second.size
+                    val wrongCount = totalCount - correctCount
+                    val accuracy = if (totalCount > 0) correctCount.toDouble() / totalCount else 0.0
+                    val difficulty = when {
+                        accuracy >= 0.8 -> "Easy"
+                        accuracy >= 0.5 -> "Moderate"
+                        else -> "Hard"
+                    }
+                    QuestionBreakdown(
+                        questionNumber = num,
+                        topic = pair.first,
+                        correctCount = correctCount,
+                        totalCount = totalCount,
+                        difficulty = "$difficulty · $correctCount/$totalCount correct · $wrongCount failed"
+                    )
                 }.sortedBy { it.questionNumber }
 
                 val topicMap = mutableMapOf<String, MutableList<Boolean>>()
@@ -2262,20 +2329,111 @@ fun WaveUnitsApp() {
                                                     }
                                                 }
                                             }
+
+                                            // ===== Question-by-Question Analysis =====
                                             item {
                                                 Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                     Column(modifier = Modifier.padding(16.dp)) {
-                                                        Text("Question Analysis", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                        Text("Question-by-Question Analysis",
+                                                            fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                        Text("Tap any question to see the students who missed it.",
+                                                            color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                        Spacer(modifier = Modifier.height(12.dp))
+
+                                                        val topicCounts = a.questionBreakdown.groupingBy { it.topic }.eachCount()
+
                                                         a.questionBreakdown.forEach { q ->
-                                                            Text("Q${q.questionNumber} (${q.topic}): ${q.correctCount}/${q.totalCount} [${q.difficulty}]",
-                                                                color = when (q.difficulty) {
-                                                                    "Easy" -> Color(0xFF10b981); "Moderate" -> Color(0xFFf59e0b); else -> Color(0xFFef4444)
-                                                                }, fontSize = 12.sp)
+                                                            val failedStudents = allResults
+                                                                .filter { student ->
+                                                                    student.questions.any { qr ->
+                                                                        qr.questionNumber == q.questionNumber && !qr.isCorrect
+                                                                    }
+                                                                }
+                                                                .map { it.studentName }
+                                                                .sorted()
+
+                                                            val parts = q.difficulty.split(" · ")
+                                                            val diffLabel = parts.getOrNull(0) ?: q.difficulty
+                                                            val correctPart = parts.getOrNull(1) ?: "${q.correctCount}/${q.totalCount} correct"
+                                                            val failCount = q.totalCount - q.correctCount
+
+                                                            val color = when (diffLabel) {
+                                                                "Easy" -> Color(0xFF10b981)
+                                                                "Moderate" -> Color(0xFFf59e0b)
+                                                                else -> Color(0xFFef4444)
+                                                            }
+
+                                                            var expanded by remember { mutableStateOf(false) }
+
+                                                            Card(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .padding(vertical = 4.dp)
+                                                                    .clickable { expanded = !expanded },
+                                                                colors = CardDefaults.cardColors(
+                                                                    containerColor = if (expanded) Color(0xFF16213f) else Color(0xFF0f172a)
+                                                                )
+                                                            ) {
+                                                                Column(modifier = Modifier.padding(12.dp)) {
+                                                                    Row(
+                                                                        modifier = Modifier.fillMaxWidth(),
+                                                                        horizontalArrangement = Arrangement.SpaceBetween
+                                                                    ) {
+                                                                        Text("Q${q.questionNumber}",
+                                                                            fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 14.sp)
+                                                                        Text(diffLabel,
+                                                                            color = color, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                                                    }
+                                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                                    Text(q.topic,
+                                                                        color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                                    Text(
+                                                                        "$correctPart · $failCount failed" +
+                                                                        if (topicCounts[q.topic] != null && topicCounts[q.topic]!! > 1)
+                                                                            " · topic repeated ${topicCounts[q.topic]}× on this paper"
+                                                                        else "",
+                                                                        color = Color(0xFF94a3b8),
+                                                                        fontSize = 11.sp
+                                                                    )
+
+                                                                    if (expanded) {
+                                                                        Spacer(modifier = Modifier.height(10.dp))
+                                                                        Divider(color = Color(0xFF1e293b), thickness = 1.dp)
+                                                                        Spacer(modifier = Modifier.height(10.dp))
+
+                                                                        Text("Strand ? Sub-strand",
+                                                                            color = Color(0xFF60a5fa), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                                        Text(q.topic, color = Color.White, fontSize = 12.sp)
+
+                                                                        Spacer(modifier = Modifier.height(8.dp))
+
+                                                                        Text("Failed by $failCount student${if (failCount == 1) "" else "s"}",
+                                                                            color = Color(0xFFef4444), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                                                                        if (failedStudents.isEmpty()) {
+                                                                            Text("No one failed this question. Nice.",
+                                                                                color = Color(0xFF10b981), fontSize = 12.sp)
+                                                                        } else {
+                                                                            failedStudents.forEach { name ->
+                                                                                Text("  • $name", color = Color.White, fontSize = 12.sp)
+                                                                            }
+                                                                        }
+
+                                                                        Spacer(modifier = Modifier.height(8.dp))
+
+                                                                        Text("Topic repeated ${topicCounts[q.topic] ?: 1}× on this paper",
+                                                                            color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                                    }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
+
                                             item {
                                                 Text("Leaderboard", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                                 Spacer(modifier = Modifier.height(8.dp))
