@@ -1793,7 +1793,7 @@ fun WaveUnitsApp() {
                                     currentProjectTitle = title
                                     loadProjects()
                                     showNewExamDialog = false
-                                    currentView = "projects"
+                                    currentView = "subject"
                                     Toast.makeText(context, "Exam created", Toast.LENGTH_SHORT).show()
                                 } catch (e: Exception) {
                                     Toast.makeText(context, "${e.message}", Toast.LENGTH_LONG).show()
