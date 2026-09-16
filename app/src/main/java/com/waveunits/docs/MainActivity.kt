@@ -1688,6 +1688,7 @@ fun WaveUnitsApp() {
             confirmButton = {
                 Button(
                     onClick = {
+                        selectedGrade = selected
                         if (selected.isNotBlank()) {
                             // Verify by writing a tiny marker doc so the grade is remembered
                             scope.launch {
