@@ -352,7 +352,7 @@ fun generateAnswerSheetTemplate(questionCount: Int): String {
     return sb.toString()
 }
 
-// ===== AI FUNCTIONS (unchanged from previous version) =====
+// ===== AI FUNCTIONS =====
 private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     return withContext(Dispatchers.IO) {
         try {
@@ -797,16 +797,12 @@ fun WaveUnitsApp() {
     var currentProjectId by remember { mutableStateOf("") }
     var currentProjectTitle by remember { mutableStateOf("") }
 
-    // ===== PERSISTENT TREE STATE =====
-    // treeGrades = ["Grade 5", "Grade 6"]
-    // treeSubjects = {"Grade 5": ["Mathematics", "CRE"], "Grade 6": ["English"]}
     var treeGrades by remember { mutableStateOf<List<String>>(emptyList()) }
     var treeSubjects by remember { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
 
     var selectedGrade by remember { mutableStateOf<String?>(null) }
     var selectedSubject by remember { mutableStateOf<String?>(null) }
 
-    // Dialog state
     var showAddGradeDialog by remember { mutableStateOf(false) }
     var showAddSubjectDialog by remember { mutableStateOf(false) }
     var showNewExamDialog by remember { mutableStateOf(false) }
@@ -853,6 +849,7 @@ fun WaveUnitsApp() {
         prefs.edit().putBoolean("isLoggedIn", isLogged)
             .putString("email", email).putString("password", password).apply()
     }
+
     val googleLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -879,7 +876,23 @@ fun WaveUnitsApp() {
         }
     }
 
-    // ===== TREE LOAD / SAVE =====
+    fun clearAllState() {
+        projects = emptyList()
+        treeGrades = emptyList()
+        treeSubjects = emptyMap()
+        selectedGrade = null
+        selectedSubject = null
+        currentProject = null
+        currentProjectId = ""
+        currentProjectTitle = ""
+        collectedStudentAnswerSheets = emptyList()
+        markedAnswerSheets = emptyList()
+        examAnalytics = null
+        seriesAnalytics = null
+        allResults = emptyList()
+        currentView = "home"
+    }
+
     fun loadTree() {
         scope.launch {
             try {
@@ -1603,8 +1616,14 @@ fun WaveUnitsApp() {
         }
     }
 
-    LaunchedEffect(isLoggedIn) {
-        if (isLoggedIn) { loadTree(); loadProjects(); loadSavedRosters() }
+    LaunchedEffect(isLoggedIn, auth.currentUser?.uid) {
+        if (isLoggedIn) {
+            // Clear first, then load — prevents cross-account state leak
+            clearAllState()
+            loadTree()
+            loadProjects()
+            loadSavedRosters()
+        }
     }
 
     // ===== DIALOGS =====
@@ -1825,9 +1844,12 @@ fun WaveUnitsApp() {
                             IconButton(onClick = {
                                 scope.launch {
                                     try { googleSignInClient.signOut().await() } catch (_: Exception) {}
-                                    auth.signOut(); isLoggedIn = false; saveLoginState(false)
+                                    auth.signOut()
+                                    isLoggedIn = false
+                                    saveLoginState(false)
+                                    clearAllState()
                                 }
-                            }) { Text("Exit", fontSize = 14.sp) }
+                            }) { Text("Log out", fontSize = 14.sp) }
                         }
                     )
                 }
@@ -1835,7 +1857,6 @@ fun WaveUnitsApp() {
                 Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
                     when (currentView) {
                         "home" -> {
-                            // ===== HOME: list of grades =====
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1849,7 +1870,10 @@ fun WaveUnitsApp() {
                             }
                             Spacer(modifier = Modifier.height(16.dp))
 
-                            if (treeGrades.isEmpty()) {
+                            val effectiveGrades = if (treeGrades.isNotEmpty()) treeGrades
+                                                  else projects.map { it.grade }.filter { it.isNotBlank() }.distinct().sorted()
+
+                            if (effectiveGrades.isEmpty()) {
                                 Column(
                                     modifier = Modifier.fillMaxSize(),
                                     verticalArrangement = Arrangement.Center,
@@ -1867,11 +1891,24 @@ fun WaveUnitsApp() {
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981)),
                                         modifier = Modifier.fillMaxWidth(0.7f)
                                     ) { Text("+ Add Subjects I Teach") }
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Button(
+                                        onClick = {
+                                            loadTree()
+                                            loadProjects()
+                                            Toast.makeText(context, "Refreshing...", Toast.LENGTH_SHORT).show()
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa)),
+                                        modifier = Modifier.fillMaxWidth(0.7f)
+                                    ) { Text("Refresh My Classes") }
                                 }
                             } else {
                                 LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                    items(treeGrades) { grade ->
-                                        val subjects = treeSubjects[grade] ?: emptyList()
+                                    items(effectiveGrades) { grade ->
+                                        val treeSubs = treeSubjects[grade] ?: emptyList()
+                                        val examSubs = projects.filter { it.grade == grade }.map { it.subjectKey }.filter { it.isNotBlank() }.distinct()
+                                        val subjects = (treeSubs + examSubs).distinct().sorted()
+
                                         Card(
                                             modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                                             colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))
@@ -1941,7 +1978,6 @@ fun WaveUnitsApp() {
                             val grade = selectedGrade ?: ""
                             val subject = selectedSubject ?: ""
 
-                            // Header row with Back
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
@@ -1958,7 +1994,6 @@ fun WaveUnitsApp() {
                             }
                             Spacer(modifier = Modifier.height(16.dp))
 
-                            // Action buttons
                             Button(
                                 onClick = { showNewExamDialog = true },
                                 modifier = Modifier.fillMaxWidth(),
