@@ -168,7 +168,6 @@ data class SectionViewState(
     val isAnswerSheetGeneratorOpen: Boolean = false
 )
 
-// ===== OpenAI key — loaded from Firebase Remote Config at startup =====
 private var OPENAI_API_KEY: String = ""
 
 // ===== UTILITY FUNCTIONS =====
@@ -387,7 +386,7 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     }
 }
 
-// ===== AI GRADING — grid-aware, free-form reply stored verbatim =====
+// ===== AI GRADING — two-part reply: human sheet + machine analytics =====
 private suspend fun gradeWithAI(
     printout: String,
     aiAnswerSheetText: String,
@@ -402,36 +401,61 @@ private suspend fun gradeWithAI(
         val prompt = """
             TASK: Grade a student's answer sheet by reading a GRID.
 
-            The printout below is NOT prose. It is a TABLE. Every row starts with a
-            question number, followed by FOUR BRACKET CELLS. The four cells
-            correspond, in order, to four columns: A, B, C, D.
+            The printout below is a TABLE. Every row starts with a question
+            number, followed by FOUR BRACKET CELLS under columns A | B | C | D.
 
-            RULE FOR READING THE STUDENT'S ANSWER ON EACH ROW:
-            - Look ONLY at the four bracket cells on that row.
-            - If the FIRST bracket cell contains a letter, the answer is that letter.
-            - If the SECOND bracket cell contains a letter, the answer is that letter.
-            - Third cell ? third letter. Fourth cell ? fourth letter.
-            - The letter must be the SAME as the column header of the cell it sits in
-              (e.g. the letter A must be in the A column). If the letter is unreadable
-              but the cell has a mark (tick, line, scribble), use the COLUMN HEADER.
+            HOW TO READ THE STUDENT'S ANSWER ON EACH ROW:
+            - Look only at the four bracket cells on that row.
+            - If the FIRST cell contains a letter, the answer is that letter.
+            - Same for the second, third, fourth cell.
             - If two cells have letters, take the LEFTMOST one.
-            - If all four cells are empty (no letter, no mark), the student's answer
-              is blank.
+            - If a bracket has a mark but the letter is unreadable, use the
+              COLUMN HEADER of that bracket as the answer.
+            - If all four cells are empty, the answer is blank.
 
-            MATCHING RULE:
-            Compare each student answer to the correct answer from the ANSWER KEY
-            below, matched by question number. Only grade questions that appear in
-            BOTH the printout and the answer key. Do not invent questions.
+            MATCHING: Compare each student answer to the correct answer from
+            the ANSWER KEY below, matched by question number. Only grade
+            questions that appear in BOTH the printout and the answer key.
 
-            OUTPUT:
-            Write one line per graded question, in any readable form, then at the
-            very end write:
+            ============ PART 1 — HUMAN-READABLE MARKED SHEET ============
+            Write one line per graded question, like:
 
+            Q1: Student chose A, correct answer is B ? WRONG
+            Q2: Student chose C, correct answer is C ? CORRECT
+
+            Then a blank line, then:
             SCORE: <number correct> / <total>
             PERCENTAGE: <number>%
             GRADE: <letter>
 
-            ===== STUDENT PRINTOUT (table) =====
+            ============ PART 2 — MACHINE-READABLE BLOCK ============
+            After the score, print this line on its own:
+
+            ---ANALYTICS---
+
+            Then ONE line per question, EXACTLY in this format, no spaces
+            around the pipes, nothing else on the line:
+
+            Q<number>|<studentLetter>|<correctLetter>|<C or W>|<topic>
+
+            Where:
+            - <studentLetter> is A/B/C/D or blank if the student left it empty
+            - <correctLetter> is the correct answer from the key
+            - <C or W> is C for correct, W for wrong
+            - <topic> is the strand and sub-strand copied from the ANSWER KEY
+              for that question, in the form "Strand ? Sub-strand"
+              (use the exact same text the key uses, e.g.
+               "Life of Prophets / Messengers ? Parables")
+
+            Example:
+            ---ANALYTICS---
+            Q1|A|B|W|Life of Prophets / Messengers ? Parables
+            Q2|C|C|C|Values ? Love
+            Q3|B|B|C|Creation ? God's creation
+
+            Do not add anything after this block.
+
+            ===== STUDENT PRINTOUT =====
             $printout
 
             ===== ANSWER KEY =====
@@ -441,7 +465,7 @@ private suspend fun gradeWithAI(
         val body = JSONObject()
             .put("model", "gpt-5.6-luna")
             .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
-            .put("max_completion_tokens", 4000)
+            .put("max_completion_tokens", 5000)
             .toString()
 
         val req = Request.Builder()
@@ -456,31 +480,54 @@ private suspend fun gradeWithAI(
             if (!res.isSuccessful) {
                 throw RuntimeException("HTTP ${res.code}: ${js.take(400)}")
             }
-            val txt = JSONObject(js).getJSONArray("choices").getJSONObject(0)
+            val fullReply = JSONObject(js).getJSONArray("choices").getJSONObject(0)
                 .getJSONObject("message").getString("content").trim()
-            if (txt.isBlank()) {
-                throw RuntimeException("Empty AI reply")
+            if (fullReply.isBlank()) throw RuntimeException("Empty AI reply")
+
+            val marker = "---ANALYTICS---"
+            val humanPart = if (fullReply.contains(marker))
+                fullReply.substringBefore(marker).trim()
+            else fullReply
+
+            val machinePart = if (fullReply.contains(marker))
+                fullReply.substringAfter(marker).trim()
+            else ""
+
+            val questions = mutableListOf<QuestionResultData>()
+            val lineRegex = Regex("""Q\s*(\d+)\s*\|\s*([A-Da-d]?)\s*\|\s*([A-Da-d]?)\s*\|\s*([CWcw])\s*\|\s*(.+)$""")
+            for (line in machinePart.lines()) {
+                val trimmed = line.trim()
+                if (trimmed.isEmpty()) continue
+                val m = lineRegex.find(trimmed) ?: continue
+                val num = m.groupValues[1].toIntOrNull() ?: continue
+                val stu = m.groupValues[2].uppercase().take(1)
+                val cor = m.groupValues[3].uppercase().take(1)
+                val isC = m.groupValues[4].uppercase() == "C"
+                val topic = m.groupValues[5].trim()
+                questions.add(QuestionResultData(num, topic, stu, cor, isC))
             }
 
-            var score = 0
-            var total = 0
-            var pct = 0.0
+            var correct = questions.count { it.isCorrect }
+            var total = questions.size
+            var pct = if (total > 0) correct * 100.0 / total else 0.0
 
-            val scoreRegex = Regex("""SCORE\s*:\s*(\d+)\s*/\s*(\d+)""", RegexOption.IGNORE_CASE)
-            scoreRegex.find(txt)?.let {
-                score = it.groupValues[1].toIntOrNull() ?: 0
-                total = it.groupValues[2].toIntOrNull() ?: 0
-                if (total > 0) pct = score * 100.0 / total
+            if (questions.isEmpty()) {
+                val scoreRegex = Regex("""SCORE\s*:\s*(\d+)\s*/\s*(\d+)""", RegexOption.IGNORE_CASE)
+                scoreRegex.find(humanPart)?.let {
+                    correct = it.groupValues[1].toIntOrNull() ?: 0
+                    total = it.groupValues[2].toIntOrNull() ?: 0
+                    if (total > 0) pct = correct * 100.0 / total
+                }
             }
 
             val single = QuestionResultData(
                 questionNumber = 0,
                 topic = "ai-text",
-                studentAnswer = txt,
+                studentAnswer = humanPart,
                 correctAnswer = "",
-                isCorrect = score > 0
+                isCorrect = correct > 0
             )
-            result = StudentResult(studentName, score, total, pct, listOf(single))
+            result = StudentResult(studentName, correct, total, pct, listOf(single) + questions)
         }
         result
     }
@@ -649,14 +696,14 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
                 ## TASK
                 For EACH question in the paper, return:
                 - number (integer)
-                - learningArea (the top-level learning area, e.g. "Religious Education", "Mathematics")
+                - learningArea (the top-level learning area)
                 - strand (one of the strands above, exactly as written)
                 - subStrand (one of the sub-strands above, exactly as written)
                 - correctAnswer (MUST be A, B, C, or D. Never null. If unknown, choose A.)
 
                 If a question clearly does not fit any listed strand, choose the
                 closest one and add "(General)" to the subStrand. Do NOT invent
-                new strands or sub-strands that aren't in the list.
+                new strands or sub-strands.
 
                 Return ONLY JSON:
                 [{"number":1,"learningArea":"Religious Education","strand":"Life of Prophets / Messengers","subStrand":"Parables","correctAnswer":"D"}, ...]
@@ -1113,6 +1160,7 @@ fun WaveUnitsApp() {
 
                 val qMap = mutableMapOf<Int, Pair<String, MutableList<Boolean>>>()
                 for (r in results) for (q in r.questions) {
+                    if (q.questionNumber <= 0) continue
                     val e = qMap.getOrPut(q.questionNumber) { Pair(q.topic, mutableListOf()) }
                     e.second.add(q.isCorrect)
                 }
@@ -1136,7 +1184,10 @@ fun WaveUnitsApp() {
                 }.sortedBy { it.questionNumber }
 
                 val topicMap = mutableMapOf<String, MutableList<Boolean>>()
-                for (r in results) for (q in r.questions) topicMap.getOrPut(q.topic) { mutableListOf() }.add(q.isCorrect)
+                for (r in results) for (q in r.questions) {
+                    if (q.questionNumber <= 0) continue
+                    topicMap.getOrPut(q.topic) { mutableListOf() }.add(q.isCorrect)
+                }
                 val classTopicPerformance = topicMap.map { (topic, list) ->
                     val c = list.count { it }; val t = list.size
                     ClassTopicPerformance(topic, if (t > 0) (c.toDouble() / t) * 100 else 0.0, t, c)
@@ -1215,7 +1266,7 @@ fun WaveUnitsApp() {
 
                     results.add(result)
 
-                    val aiText = result.questions.firstOrNull()?.studentAnswer ?: ""
+                    val aiText = result.questions.firstOrNull { it.questionNumber == 0 }?.studentAnswer ?: ""
                     val markedText = "STUDENT: ${sheet.studentName}\n" +
                                      "--------------------------------\n" +
                                      aiText +
@@ -1232,9 +1283,17 @@ fun WaveUnitsApp() {
                         "studentName" to sheet.studentName,
                         "examId" to currentProjectId, "examTitle" to currentProjectTitle,
                         "score" to result.score, "totalMarks" to result.totalMarks, "percentage" to result.percentage,
-                        "gradedBy" to "ai-freeform",
+                        "gradedBy" to "ai-two-part",
                         "rawText" to sheet.extractedText,
-                        "questions" to emptyList<Map<String, Any>>(),
+                        "questions" to result.questions
+                            .filter { it.questionNumber > 0 }
+                            .map { q -> mapOf(
+                                "questionNumber" to q.questionNumber,
+                                "topic" to q.topic,
+                                "studentAnswer" to q.studentAnswer,
+                                "correctAnswer" to q.correctAnswer,
+                                "isCorrect" to q.isCorrect
+                            ) },
                         "createdAt" to System.currentTimeMillis()
                     ))
                 }
@@ -1249,6 +1308,7 @@ fun WaveUnitsApp() {
                 isGrading = false
                 showMarkingResults = true
                 markedAnswerSheets = marked
+                loadAdvancedAnalytics()
                 Toast.makeText(context, "Graded ${results.size}", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Toast.makeText(context, "${e.message}", Toast.LENGTH_LONG).show()
@@ -2342,90 +2402,95 @@ fun WaveUnitsApp() {
                                                             color = Color(0xFF94a3b8), fontSize = 11.sp)
                                                         Spacer(modifier = Modifier.height(12.dp))
 
-                                                        val topicCounts = a.questionBreakdown.groupingBy { it.topic }.eachCount()
+                                                        if (a.questionBreakdown.isEmpty()) {
+                                                            Text("No per-question data yet. Re-grade the sheets.",
+                                                                color = Color(0xFFf59e0b), fontSize = 12.sp)
+                                                        } else {
+                                                            val topicCounts = a.questionBreakdown.groupingBy { it.topic }.eachCount()
 
-                                                        a.questionBreakdown.forEach { q ->
-                                                            val failedStudents = allResults
-                                                                .filter { student ->
-                                                                    student.questions.any { qr ->
-                                                                        qr.questionNumber == q.questionNumber && !qr.isCorrect
-                                                                    }
-                                                                }
-                                                                .map { it.studentName }
-                                                                .sorted()
-
-                                                            val parts = q.difficulty.split(" · ")
-                                                            val diffLabel = parts.getOrNull(0) ?: q.difficulty
-                                                            val correctPart = parts.getOrNull(1) ?: "${q.correctCount}/${q.totalCount} correct"
-                                                            val failCount = q.totalCount - q.correctCount
-
-                                                            val color = when (diffLabel) {
-                                                                "Easy" -> Color(0xFF10b981)
-                                                                "Moderate" -> Color(0xFFf59e0b)
-                                                                else -> Color(0xFFef4444)
-                                                            }
-
-                                                            var expanded by remember { mutableStateOf(false) }
-
-                                                            Card(
-                                                                modifier = Modifier
-                                                                    .fillMaxWidth()
-                                                                    .padding(vertical = 4.dp)
-                                                                    .clickable { expanded = !expanded },
-                                                                colors = CardDefaults.cardColors(
-                                                                    containerColor = if (expanded) Color(0xFF16213f) else Color(0xFF0f172a)
-                                                                )
-                                                            ) {
-                                                                Column(modifier = Modifier.padding(12.dp)) {
-                                                                    Row(
-                                                                        modifier = Modifier.fillMaxWidth(),
-                                                                        horizontalArrangement = Arrangement.SpaceBetween
-                                                                    ) {
-                                                                        Text("Q${q.questionNumber}",
-                                                                            fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 14.sp)
-                                                                        Text(diffLabel,
-                                                                            color = color, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                                                    }
-                                                                    Spacer(modifier = Modifier.height(4.dp))
-                                                                    Text(q.topic,
-                                                                        color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                                                                    Spacer(modifier = Modifier.height(4.dp))
-                                                                    Text(
-                                                                        "$correctPart · $failCount failed" +
-                                                                        if (topicCounts[q.topic] != null && topicCounts[q.topic]!! > 1)
-                                                                            " · topic repeated ${topicCounts[q.topic]}× on this paper"
-                                                                        else "",
-                                                                        color = Color(0xFF94a3b8),
-                                                                        fontSize = 11.sp
-                                                                    )
-
-                                                                    if (expanded) {
-                                                                        Spacer(modifier = Modifier.height(10.dp))
-                                                                        Divider(color = Color(0xFF1e293b), thickness = 1.dp)
-                                                                        Spacer(modifier = Modifier.height(10.dp))
-
-                                                                        Text("Strand ? Sub-strand",
-                                                                            color = Color(0xFF60a5fa), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                                                        Text(q.topic, color = Color.White, fontSize = 12.sp)
-
-                                                                        Spacer(modifier = Modifier.height(8.dp))
-
-                                                                        Text("Failed by $failCount student${if (failCount == 1) "" else "s"}",
-                                                                            color = Color(0xFFef4444), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-
-                                                                        if (failedStudents.isEmpty()) {
-                                                                            Text("No one failed this question. Nice.",
-                                                                                color = Color(0xFF10b981), fontSize = 12.sp)
-                                                                        } else {
-                                                                            failedStudents.forEach { name ->
-                                                                                Text("  • $name", color = Color.White, fontSize = 12.sp)
-                                                                            }
+                                                            a.questionBreakdown.forEach { q ->
+                                                                val failedStudents = allResults
+                                                                    .filter { student ->
+                                                                        student.questions.any { qr ->
+                                                                            qr.questionNumber == q.questionNumber && !qr.isCorrect
                                                                         }
+                                                                    }
+                                                                    .map { it.studentName }
+                                                                    .sorted()
 
-                                                                        Spacer(modifier = Modifier.height(8.dp))
+                                                                val parts = q.difficulty.split(" · ")
+                                                                val diffLabel = parts.getOrNull(0) ?: q.difficulty
+                                                                val correctPart = parts.getOrNull(1) ?: "${q.correctCount}/${q.totalCount} correct"
+                                                                val failCount = q.totalCount - q.correctCount
 
-                                                                        Text("Topic repeated ${topicCounts[q.topic] ?: 1}× on this paper",
-                                                                            color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                                val color = when (diffLabel) {
+                                                                    "Easy" -> Color(0xFF10b981)
+                                                                    "Moderate" -> Color(0xFFf59e0b)
+                                                                    else -> Color(0xFFef4444)
+                                                                }
+
+                                                                var expanded by remember { mutableStateOf(false) }
+
+                                                                Card(
+                                                                    modifier = Modifier
+                                                                        .fillMaxWidth()
+                                                                        .padding(vertical = 4.dp)
+                                                                        .clickable { expanded = !expanded },
+                                                                    colors = CardDefaults.cardColors(
+                                                                        containerColor = if (expanded) Color(0xFF16213f) else Color(0xFF0f172a)
+                                                                    )
+                                                                ) {
+                                                                    Column(modifier = Modifier.padding(12.dp)) {
+                                                                        Row(
+                                                                            modifier = Modifier.fillMaxWidth(),
+                                                                            horizontalArrangement = Arrangement.SpaceBetween
+                                                                        ) {
+                                                                            Text("Q${q.questionNumber}",
+                                                                                fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 14.sp)
+                                                                            Text(diffLabel,
+                                                                                color = color, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                                                        }
+                                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                                        Text(q.topic,
+                                                                            color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                                        Text(
+                                                                            "$correctPart · $failCount failed" +
+                                                                            if (topicCounts[q.topic] != null && topicCounts[q.topic]!! > 1)
+                                                                                " · topic repeated ${topicCounts[q.topic]}× on this paper"
+                                                                            else "",
+                                                                            color = Color(0xFF94a3b8),
+                                                                            fontSize = 11.sp
+                                                                        )
+
+                                                                        if (expanded) {
+                                                                            Spacer(modifier = Modifier.height(10.dp))
+                                                                            Divider(color = Color(0xFF1e293b), thickness = 1.dp)
+                                                                            Spacer(modifier = Modifier.height(10.dp))
+
+                                                                            Text("Strand ? Sub-strand",
+                                                                                color = Color(0xFF60a5fa), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                                            Text(q.topic, color = Color.White, fontSize = 12.sp)
+
+                                                                            Spacer(modifier = Modifier.height(8.dp))
+
+                                                                            Text("Failed by $failCount student${if (failCount == 1) "" else "s"}",
+                                                                                color = Color(0xFFef4444), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                                                                            if (failedStudents.isEmpty()) {
+                                                                                Text("No one failed this question. Nice.",
+                                                                                    color = Color(0xFF10b981), fontSize = 12.sp)
+                                                                            } else {
+                                                                                failedStudents.forEach { name ->
+                                                                                    Text("  • $name", color = Color.White, fontSize = 12.sp)
+                                                                                }
+                                                                            }
+
+                                                                            Spacer(modifier = Modifier.height(8.dp))
+
+                                                                            Text("Topic repeated ${topicCounts[q.topic] ?: 1}× on this paper",
+                                                                                color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                                        }
                                                                     }
                                                                 }
                                                             }
