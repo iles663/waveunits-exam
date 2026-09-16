@@ -853,6 +853,31 @@ fun WaveUnitsApp() {
         prefs.edit().putBoolean("isLoggedIn", isLogged)
             .putString("email", email).putString("password", password).apply()
     }
+    val googleLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
+        try {
+            val account = task.getResult(ApiException::class.java)
+            val idToken = account.idToken
+            if (idToken == null) {
+                Toast.makeText(context, "Google sign-in failed: no ID token", Toast.LENGTH_LONG).show()
+                return@rememberLauncherForActivityResult
+            }
+            val credential = GoogleAuthProvider.getCredential(idToken, null)
+            auth.signInWithCredential(credential).addOnCompleteListener { t ->
+                if (t.isSuccessful) {
+                    isLoggedIn = true
+                    saveLoginState(true)
+                    Toast.makeText(context, "Signed in", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Sign-in failed: ${t.exception?.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        } catch (e: ApiException) {
+            Toast.makeText(context, "Google sign-in error: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
 
     // ===== TREE LOAD / SAVE =====
     fun loadTree() {
