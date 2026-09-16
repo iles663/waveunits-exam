@@ -74,22 +74,22 @@ class MainActivity : ComponentActivity() {
 data class ExamProject(
     val id: String = "",
     val title: String = "",
-    val subject: String = "",
+    val subjectKey: String = "",
+    val grade: String = "",
     val status: String = "",
     val createdAt: String = "",
+    val createdAtMillis: Long = 0L,
     val questionPaperText: String = "",
     val aiAnswerSheet: String = "",
     val simplifiedAnswerKey: String = "",
-    val questionPaperImage: String = "",
     val questionPaperImages: List<String> = emptyList(),
     val allQuestionTexts: List<String> = emptyList(),
-    val extractedTextSaved: Boolean = false,
-    val answerSheetGenerated: Boolean = false,
-    val manualAnswerSheet: String = "",
-    val manualAnswerKey: String = "",
-    val markingMode: String = "ai",
-    val answerKey: String = "",
-    val studentAnswerSheets: List<StudentAnswerSheetData> = emptyList()
+    val answerKey: String = ""
+)
+
+data class ClassPath(
+    val grade: String = "",
+    val subjectKey: String = ""
 )
 
 data class QuestionData(val number: Int, val topic: String, val correctAnswer: String, val subTopic: String = "")
@@ -147,6 +147,24 @@ data class ExamAnalyticsBundle(
     val studentComparisons: List<StudentComparisonData>
 )
 
+// Series-level: aggregated across multiple exams in the same class path
+data class ExamPoint(val examId: String, val examTitle: String, val timestamp: Long, val classAverage: Double, val studentCount: Int)
+data class TopicSeriesPoint(val topic: String, val scores: List<Pair<Long, Double>>, val isPersistentlyWeak: Boolean)
+data class StudentSeriesPoint(val studentName: String, val scores: List<Pair<Long, Double>>, val change: Double, val trend: String)
+data class ClusterPoint(val topic: String, val students: List<String>, val examCount: Int)
+
+data class SeriesAnalyticsBundle(
+    val grade: String,
+    val subjectKey: String,
+    val examPoints: List<ExamPoint>,
+    val classAverage: Double,
+    val classTrend: Double,
+    val topicSeries: List<TopicSeriesPoint>,
+    val studentSeries: List<StudentSeriesPoint>,
+    val clusters: List<ClusterPoint>,
+    val examCount: Int
+)
+
 data class MarkedAnswerSheetData(
     val studentName: String, val markedText: String, val image: String,
     val score: Int, val total: Int, val percentage: Double
@@ -169,6 +187,25 @@ data class SectionViewState(
 )
 
 private var OPENAI_API_KEY: String = ""
+
+val CBC_SUBJECTS = listOf(
+    "Mathematics",
+    "English",
+    "Kiswahili",
+    "Integrated Science",
+    "Social Studies",
+    "Agriculture and Nutrition",
+    "Creative Arts and Sports",
+    "Religious Education (CRE)",
+    "Religious Education (IRE)",
+    "Religious Education (HRE)",
+    "Pre-Technical Studies"
+)
+
+val CBC_GRADES = listOf(
+    "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6",
+    "Grade 7", "Grade 8", "Grade 9", "Grade 10", "Grade 11", "Grade 12"
+)
 
 // ===== UTILITY FUNCTIONS =====
 fun parseCreatedAt(value: Any?): Long = when (value) {
@@ -194,7 +231,6 @@ fun decodeBase64(base64: String): Bitmap? = try {
 fun parseAnswerKeyToQuestions(answerKeyString: String): List<QuestionData> {
     val questions = mutableListOf<QuestionData>()
     if (answerKeyString.isBlank()) return questions
-
     val pattern1 = Regex("""Q(\d+):\s*Answer:\s*([A-Da-d])\s*\|\s*Topic:\s*([^|]+)\s*\|\s*Sub-topic:\s*([^|]+)""")
     for (match in pattern1.findAll(answerKeyString)) {
         val number = match.groupValues[1].toIntOrNull() ?: continue
@@ -204,7 +240,6 @@ fun parseAnswerKeyToQuestions(answerKeyString: String): List<QuestionData> {
         questions.add(QuestionData(number, topic, answer, subTopic))
     }
     if (questions.isNotEmpty()) return questions
-
     val pattern2 = Regex("""(\d+)\s*:\s*([A-Da-d])""")
     for (match in pattern2.findAll(answerKeyString)) {
         val number = match.groupValues[1].toIntOrNull() ?: continue
@@ -322,7 +357,7 @@ fun generateAnswerSheetTemplate(questionCount: Int): String {
     return sb.toString()
 }
 
-// ===== AI: STAGE 1 — TRANSCRIBE ANSWER SHEET =====
+// ===== AI: TRANSCRIBE ANSWER SHEET =====
 private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     return withContext(Dispatchers.IO) {
         try {
@@ -380,13 +415,11 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
                     "ERR parse: ${e.message} | raw: ${js.take(400)}"
                 }
             }
-        } catch (e: Exception) {
-            "ERR exception: ${e.message}"
-        }
+        } catch (e: Exception) { "ERR exception: ${e.message}" }
     }
 }
 
-// ===== AI GRADING — two-part reply: human sheet + machine analytics =====
+// ===== AI GRADING — two-part reply =====
 private suspend fun gradeWithAI(
     printout: String,
     aiAnswerSheetText: String,
@@ -433,8 +466,7 @@ private suspend fun gradeWithAI(
 
             ---ANALYTICS---
 
-            Then ONE line per question, EXACTLY in this format, no spaces
-            around the pipes, nothing else on the line:
+            Then ONE line per question, EXACTLY in this format:
 
             Q<number>|<studentLetter>|<correctLetter>|<C or W>|<topic>
 
@@ -443,15 +475,13 @@ private suspend fun gradeWithAI(
             - <correctLetter> is the correct answer from the key
             - <C or W> is C for correct, W for wrong
             - <topic> is the strand and sub-strand copied from the ANSWER KEY
-              for that question, in the form "Strand ? Sub-strand"
-              (use the exact same text the key uses, e.g.
-               "Life of Prophets / Messengers ? Parables")
+              for that question, in the form "Strand -> Sub-strand"
 
             Example:
             ---ANALYTICS---
-            Q1|A|B|W|Life of Prophets / Messengers ? Parables
-            Q2|C|C|C|Values ? Love
-            Q3|B|B|C|Creation ? God's creation
+            Q1|A|B|W|Life of Prophets / Messengers -> Parables
+            Q2|C|C|C|Values -> Love
+            Q3|B|B|C|Creation -> God's creation
 
             Do not add anything after this block.
 
@@ -485,13 +515,8 @@ private suspend fun gradeWithAI(
             if (fullReply.isBlank()) throw RuntimeException("Empty AI reply")
 
             val marker = "---ANALYTICS---"
-            val humanPart = if (fullReply.contains(marker))
-                fullReply.substringBefore(marker).trim()
-            else fullReply
-
-            val machinePart = if (fullReply.contains(marker))
-                fullReply.substringAfter(marker).trim()
-            else ""
+            val humanPart = if (fullReply.contains(marker)) fullReply.substringBefore(marker).trim() else fullReply
+            val machinePart = if (fullReply.contains(marker)) fullReply.substringAfter(marker).trim() else ""
 
             val questions = mutableListOf<QuestionResultData>()
             val lineRegex = Regex("""Q\s*(\d+)\s*\|\s*([A-Da-d]?)\s*\|\s*([A-Da-d]?)\s*\|\s*([CWcw])\s*\|\s*(.+)$""")
@@ -641,9 +666,7 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
                 identify its STRAND and SUB-STRAND from the official KICD
                 rationalized curriculum, and the correct answer.
 
-                Match by MEANING, not by keyword.
-
-                ## CBC LEARNING AREAS AND STRANDS
+                ## CBC STRANDS BY LEARNING AREA
 
                 English:
                 - Listening and Speaking (subs: Polite expressions, Directions, Debates, Oral presentation)
@@ -663,7 +686,7 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
                 - Geometry (subs: Shapes, Angles, Lines, Polygons, Coordinates)
                 - Data Handling (subs: Pictographs, Bar graphs, Pie charts, Averages)
 
-                Science and Technology:
+                Integrated Science:
                 - Living Things (subs: Plants, Animals, Human body, Health)
                 - Environment (subs: Pollution, Conservation, Weather, Soil)
                 - Matter (subs: States of matter, Mixtures, Acids and bases)
@@ -681,7 +704,7 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
                 - Consumer Education (subs: Food safety, Cooking, Nutrition)
                 - Needlework (subs: Stitches, Garment making)
 
-                Creative Arts:
+                Creative Arts and Sports:
                 - Visual Arts (subs: Drawing, Painting, Modelling, Craft)
                 - Music (subs: Singing, Instruments, Rhythm, Composition)
                 - Performing Arts (subs: Dance, Drama, Puppetry)
@@ -693,20 +716,20 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
                 - Life of Prophets / Messengers (subs: Prophets, Miracles, Parables)
                 - Values (subs: Love, Honesty, Obedience, Sharing, Integrity)
 
-                ## TASK
-                For EACH question in the paper, return:
-                - number (integer)
-                - learningArea (the top-level learning area)
-                - strand (one of the strands above, exactly as written)
-                - subStrand (one of the sub-strands above, exactly as written)
-                - correctAnswer (MUST be A, B, C, or D. Never null. If unknown, choose A.)
+                Pre-Technical Studies:
+                - Technical Drawing (subs: Orthographic projection, Sketching)
+                - Digital Literacy (subs: Computing, Coding, Spreadsheets)
+                - Business Basics (subs: Money, Trade, Entrepreneurship)
 
-                If a question clearly does not fit any listed strand, choose the
-                closest one and add "(General)" to the subStrand. Do NOT invent
-                new strands or sub-strands.
+                ## TASK
+                Return one entry per question:
+                - number (integer)
+                - strand (from the list above, exactly as written)
+                - subStrand (from the list above, exactly as written)
+                - correctAnswer (MUST be A, B, C, or D. Never null.)
 
                 Return ONLY JSON:
-                [{"number":1,"learningArea":"Religious Education","strand":"Life of Prophets / Messengers","subStrand":"Parables","correctAnswer":"D"}, ...]
+                [{"number":1,"strand":"Life of Prophets / Messengers","subStrand":"Parables","correctAnswer":"D"}, ...]
 
                 Question paper:
                 $rawText
@@ -736,7 +759,7 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
                     val safe = if (answer in listOf("A", "B", "C", "D")) answer else "A"
                     val strand = o.optString("strand", "General")
                     val subStrand = o.optString("subStrand", "General")
-                    val topic = if (subStrand.isBlank() || subStrand == "General") strand else "$strand ? $subStrand"
+                    val topic = if (subStrand.isBlank() || subStrand == "General") strand else "$strand -> $subStrand"
                     qs.add(QuestionData(
                         number = o.getInt("number"),
                         topic = topic,
@@ -834,11 +857,21 @@ fun WaveUnitsApp() {
     var password by remember { mutableStateOf(prefs.getString("password", "") ?: "") }
     var isLoggedIn by remember { mutableStateOf(prefs.getBoolean("isLoggedIn", false)) }
     var showSignup by remember { mutableStateOf(false) }
-    var currentView by remember { mutableStateOf("projects") }
+    var currentView by remember { mutableStateOf("home") }
     var projects by remember { mutableStateOf<List<ExamProject>>(emptyList()) }
     var currentProject by remember { mutableStateOf<ExamProject?>(null) }
     var currentProjectId by remember { mutableStateOf("") }
     var currentProjectTitle by remember { mutableStateOf("") }
+
+    // Folder tree navigation state
+    var selectedGrade by remember { mutableStateOf<String?>(null) }
+    var selectedSubject by remember { mutableStateOf<String?>(null) }
+    var showAddGradeDialog by remember { mutableStateOf(false) }
+    var showAddSubjectDialog by remember { mutableStateOf(false) }
+    var showNewExamDialog by remember { mutableStateOf(false) }
+    var knownGrades by remember { mutableStateOf<List<String>>(emptyList()) }
+    var knownSubjectsByGrade by remember { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
+
     var scanPhase by remember { mutableStateOf("") }
     var progressText by remember { mutableStateOf("") }
     var extractedQuestions by remember { mutableStateOf<List<QuestionData>>(emptyList()) }
@@ -864,7 +897,6 @@ fun WaveUnitsApp() {
     var answerSheetQuestionCount by remember { mutableStateOf("20") }
     var generatedAnswerSheetText by remember { mutableStateOf("") }
     var previousTopicPerformance by remember { mutableStateOf<List<ClassTopicPerformance>>(emptyList()) }
-    var showMarkingResults by remember { mutableStateOf(false) }
     var isExtracting by remember { mutableStateOf(false) }
     var collectedStudentAnswerSheets by remember { mutableStateOf<List<StudentAnswerSheetData>>(emptyList()) }
     var markedAnswerSheets by remember { mutableStateOf<List<MarkedAnswerSheetData>>(emptyList()) }
@@ -874,6 +906,7 @@ fun WaveUnitsApp() {
     var isAIThinking by remember { mutableStateOf(false) }
     var savedAIResponses by remember { mutableStateOf<List<AIQuestionAnswer>>(emptyList()) }
     var examAnalytics by remember { mutableStateOf<ExamAnalyticsBundle?>(null) }
+    var seriesAnalytics by remember { mutableStateOf<SeriesAnalyticsBundle?>(null) }
     var selectedStudent by remember { mutableStateOf<StudentPerformance?>(null) }
     var allResults by remember { mutableStateOf<List<StudentResult>>(emptyList()) }
 
@@ -926,23 +959,31 @@ fun WaveUnitsApp() {
                     ExamProject(
                         id = doc.id,
                         title = doc.getString("title") ?: "",
-                        subject = doc.getString("subject") ?: "",
+                        subjectKey = doc.getString("subjectKey") ?: "",
+                        grade = doc.getString("grade") ?: "",
                         status = doc.getString("status") ?: "created",
                         createdAt = formatTimestamp(createdAtMillis),
+                        createdAtMillis = createdAtMillis,
                         questionPaperText = doc.getString("questionPaperText") ?: "",
                         aiAnswerSheet = doc.getString("aiAnswerSheet") ?: "",
                         simplifiedAnswerKey = doc.getString("simplifiedAnswerKey") ?: "",
-                        questionPaperImage = doc.getString("questionPaperImage") ?: "",
                         questionPaperImages = doc.get("questionPaperImages") as? List<String> ?: emptyList(),
                         allQuestionTexts = doc.get("allQuestionTexts") as? List<String> ?: emptyList(),
-                        extractedTextSaved = doc.getBoolean("extractedTextSaved") ?: false,
-                        answerSheetGenerated = doc.getBoolean("answerSheetGenerated") ?: false,
-                        manualAnswerSheet = doc.getString("manualAnswerSheet") ?: "",
-                        manualAnswerKey = doc.getString("manualAnswerKey") ?: "",
-                        markingMode = doc.getString("markingMode") ?: "ai",
                         answerKey = doc.getString("answerKey") ?: ""
                     )
-                }.sortedByDescending { parseCreatedAt(it.createdAt) }
+                }.sortedByDescending { it.createdAtMillis }
+
+                // Build folder tree: grades and subjects
+                val grades = projects.map { it.grade }.filter { it.isNotBlank() }.distinct().sorted()
+                knownGrades = grades
+                val subjectMap = mutableMapOf<String, MutableList<String>>()
+                for (p in projects) {
+                    if (p.grade.isNotBlank() && p.subjectKey.isNotBlank()) {
+                        val list = subjectMap.getOrPut(p.grade) { mutableListOf() }
+                        if (!list.contains(p.subjectKey)) list.add(p.subjectKey)
+                    }
+                }
+                knownSubjectsByGrade = subjectMap.mapValues { it.value.sorted() }
             } catch (e: Exception) {
                 Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
@@ -1063,49 +1104,10 @@ fun WaveUnitsApp() {
         }
     }
 
-    fun loadPreviousExamTopicPerformance(currentExamId: String) {
+    fun loadExamAnalytics(examId: String) {
         scope.launch {
             try {
-                val uid = auth.currentUser?.uid ?: return@launch
-                val examsQuery = db.collection("exams").whereEqualTo("teacherId", uid)
-                    .orderBy("createdAt", com.google.firebase.firestore.Query.Direction.DESCENDING)
-                    .limit(5).get().await()
-                val previousExams = examsQuery.documents.filter { it.id != currentExamId }
-                if (previousExams.isEmpty()) return@launch
-                val previousExam = previousExams[0]
-                val resultsQuery = db.collection("results").whereEqualTo("examId", previousExam.id).get().await()
-                val results = resultsQuery.documents.map { doc ->
-                    val questionsData = doc.get("questions") as? List<Map<String, Any>> ?: emptyList()
-                    StudentResult(
-                        studentName = doc.getString("studentName") ?: "Unknown",
-                        score = (doc.get("score") as? Number)?.toInt() ?: 0,
-                        totalMarks = (doc.get("totalMarks") as? Number)?.toInt() ?: 0,
-                        percentage = (doc.get("percentage") as? Number)?.toDouble() ?: 0.0,
-                        questions = questionsData.map { q ->
-                            QuestionResultData(
-                                questionNumber = (q["questionNumber"] as? Number)?.toInt() ?: 0,
-                                topic = q["topic"] as? String ?: "",
-                                studentAnswer = q["studentAnswer"] as? String ?: "",
-                                correctAnswer = q["correctAnswer"] as? String ?: "",
-                                isCorrect = q["isCorrect"] as? Boolean ?: false
-                            )
-                        }
-                    )
-                }
-                val map = mutableMapOf<String, MutableList<Boolean>>()
-                for (r in results) for (q in r.questions) map.getOrPut(q.topic) { mutableListOf() }.add(q.isCorrect)
-                previousTopicPerformance = map.map { (topic, list) ->
-                    val c = list.count { it }; val t = list.size
-                    ClassTopicPerformance(topic, if (t > 0) (c.toDouble() / t) * 100 else 0.0, t, c)
-                }
-            } catch (e: Exception) {}
-        }
-    }
-
-    fun loadAdvancedAnalytics() {
-        scope.launch {
-            try {
-                val resultsQuery = db.collection("results").whereEqualTo("examId", currentProjectId).get().await()
+                val resultsQuery = db.collection("results").whereEqualTo("examId", examId).get().await()
                 val results = resultsQuery.documents.map { doc ->
                     val questionsData = doc.get("questions") as? List<Map<String, Any>> ?: emptyList()
                     StudentResult(
@@ -1179,7 +1181,7 @@ fun WaveUnitsApp() {
                         topic = pair.first,
                         correctCount = correctCount,
                         totalCount = totalCount,
-                        difficulty = "$difficulty · $correctCount/$totalCount correct · $wrongCount failed"
+                        difficulty = "$difficulty | $correctCount/$totalCount correct | $wrongCount failed"
                     )
                 }.sortedBy { it.questionNumber }
 
@@ -1207,6 +1209,143 @@ fun WaveUnitsApp() {
                 )
             } catch (e: Exception) {
                 Toast.makeText(context, "Analytics error: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun loadSeriesAnalytics(grade: String, subjectKey: String) {
+        scope.launch {
+            try {
+                // Get all exams in this series, sorted newest first
+                val seriesExams = projects
+                    .filter { it.grade == grade && it.subjectKey == subjectKey }
+                    .sortedByDescending { it.createdAtMillis }
+
+                if (seriesExams.isEmpty()) {
+                    seriesAnalytics = SeriesAnalyticsBundle(
+                        grade, subjectKey, emptyList(), 0.0, 0.0,
+                        emptyList(), emptyList(), emptyList(), 0
+                    )
+                    return@launch
+                }
+
+                val examPoints = mutableListOf<ExamPoint>()
+                val perExamResults = mutableMapOf<String, List<StudentResult>>()
+
+                for (exam in seriesExams) {
+                    val resultsQuery = db.collection("results").whereEqualTo("examId", exam.id).get().await()
+                    val results = resultsQuery.documents.map { doc ->
+                        val questionsData = doc.get("questions") as? List<Map<String, Any>> ?: emptyList()
+                        StudentResult(
+                            studentName = doc.getString("studentName") ?: "Unknown",
+                            score = (doc.get("score") as? Number)?.toInt() ?: 0,
+                            totalMarks = (doc.get("totalMarks") as? Number)?.toInt() ?: 0,
+                            percentage = (doc.get("percentage") as? Number)?.toDouble() ?: 0.0,
+                            questions = questionsData.map { q ->
+                                QuestionResultData(
+                                    (q["questionNumber"] as? Number)?.toInt() ?: 0,
+                                    q["topic"] as? String ?: "General",
+                                    q["studentAnswer"] as? String ?: "",
+                                    q["correctAnswer"] as? String ?: "",
+                                    q["isCorrect"] as? Boolean ?: false
+                                )
+                            }
+                        )
+                    }
+                    perExamResults[exam.id] = results
+                    val avg = if (results.isNotEmpty()) results.map { it.percentage }.average() else 0.0
+                    examPoints.add(ExamPoint(exam.id, exam.title, exam.createdAtMillis, avg, results.size))
+                }
+
+                val examPointsAsc = examPoints.sortedBy { it.timestamp }
+                val classAverage = if (examPoints.isNotEmpty()) examPoints.map { it.classAverage }.average() else 0.0
+                val classTrend = if (examPoints.size >= 2) {
+                    examPoints.first().classAverage - examPoints.last().classAverage
+                } else 0.0
+
+                // Topic series
+                val topicSeriesMap = mutableMapOf<String, MutableList<Pair<Long, Double>>>()
+                for (exam in seriesExams) {
+                    val results = perExamResults[exam.id] ?: continue
+                    val topicMap = mutableMapOf<String, MutableList<Boolean>>()
+                    for (r in results) for (q in r.questions) {
+                        if (q.questionNumber <= 0) continue
+                        topicMap.getOrPut(q.topic) { mutableListOf() }.add(q.isCorrect)
+                    }
+                    for ((topic, list) in topicMap) {
+                        val pct = if (list.isNotEmpty()) list.count { it } * 100.0 / list.size else 0.0
+                        topicSeriesMap.getOrPut(topic) { mutableListOf() }.add(Pair(exam.createdAtMillis, pct))
+                    }
+                }
+                val topicSeries = topicSeriesMap.map { (topic, points) ->
+                    val sortedPoints = points.sortedBy { it.first }
+                    val weakEveryTime = sortedPoints.isNotEmpty() && sortedPoints.all { it.second < 50.0 }
+                    TopicSeriesPoint(topic, sortedPoints, weakEveryTime)
+                }.sortedBy { it.topic }
+
+                // Student series
+                val studentSeriesMap = mutableMapOf<String, MutableList<Pair<Long, Double>>>()
+                for (exam in seriesExams) {
+                    val results = perExamResults[exam.id] ?: continue
+                    for (r in results) {
+                        if (r.studentName.isBlank() || r.studentName == "Unknown") continue
+                        studentSeriesMap.getOrPut(r.studentName) { mutableListOf() }
+                            .add(Pair(exam.createdAtMillis, r.percentage))
+                    }
+                }
+                val studentSeries = studentSeriesMap.map { (name, points) ->
+                    val sortedPoints = points.sortedBy { it.first }
+                    val change = if (sortedPoints.size >= 2) {
+                        sortedPoints.last().second - sortedPoints.first().second
+                    } else 0.0
+                    val trend = when {
+                        sortedPoints.size < 2 -> "insufficient data"
+                        change > 5.0 -> "improving"
+                        change < -5.0 -> "declining"
+                        else -> "steady"
+                    }
+                    StudentSeriesPoint(name, sortedPoints, change, trend)
+                }.sortedByDescending { it.change }
+
+                // Clusters: topics where the same students consistently fail
+                val clusters = mutableListOf<ClusterPoint>()
+                val examCountInSeries = seriesExams.size
+                if (examCountInSeries >= 2) {
+                    val topicStudentFailures = mutableMapOf<String, MutableMap<String, Int>>()
+                    for (exam in seriesExams) {
+                        val results = perExamResults[exam.id] ?: continue
+                        for (r in results) {
+                            for (q in r.questions) {
+                                if (q.questionNumber <= 0) continue
+                                if (!q.isCorrect) {
+                                    val m = topicStudentFailures.getOrPut(q.topic) { mutableMapOf() }
+                                    m[r.studentName] = (m[r.studentName] ?: 0) + 1
+                                }
+                            }
+                        }
+                    }
+                    for ((topic, studentCounts) in topicStudentFailures) {
+                        val consistent = studentCounts.filter { it.value >= examCountInSeries }
+                            .keys.toList().sorted()
+                        if (consistent.size >= 2) {
+                            clusters.add(ClusterPoint(topic, consistent, examCountInSeries))
+                        }
+                    }
+                }
+
+                seriesAnalytics = SeriesAnalyticsBundle(
+                    grade = grade,
+                    subjectKey = subjectKey,
+                    examPoints = examPoints,
+                    classAverage = classAverage,
+                    classTrend = classTrend,
+                    topicSeries = topicSeries,
+                    studentSeries = studentSeries,
+                    clusters = clusters,
+                    examCount = examPoints.size
+                )
+            } catch (e: Exception) {
+                Toast.makeText(context, "Series error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -1246,6 +1385,10 @@ fun WaveUnitsApp() {
                     return@launch
                 }
 
+                val p = projects.find { it.id == currentProjectId }
+                val grade = p?.grade ?: ""
+                val subjectKey = p?.subjectKey ?: ""
+
                 val results = mutableListOf<StudentResult>()
                 val marked = mutableListOf<MarkedAnswerSheetData>()
 
@@ -1281,7 +1424,10 @@ fun WaveUnitsApp() {
                     db.collection("results").add(mapOf(
                         "teacherId" to auth.currentUser?.uid,
                         "studentName" to sheet.studentName,
-                        "examId" to currentProjectId, "examTitle" to currentProjectTitle,
+                        "examId" to currentProjectId,
+                        "examTitle" to currentProjectTitle,
+                        "grade" to grade,
+                        "subjectKey" to subjectKey,
                         "score" to result.score, "totalMarks" to result.totalMarks, "percentage" to result.percentage,
                         "gradedBy" to "ai-two-part",
                         "rawText" to sheet.extractedText,
@@ -1306,9 +1452,8 @@ fun WaveUnitsApp() {
                 db.collection("exams").document(currentProjectId).update("status", "graded")
                 progressText = "Graded ${results.size} papers!"
                 isGrading = false
-                showMarkingResults = true
                 markedAnswerSheets = marked
-                loadAdvancedAnalytics()
+                loadExamAnalytics(currentProjectId)
                 Toast.makeText(context, "Graded ${results.size}", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Toast.makeText(context, "${e.message}", Toast.LENGTH_LONG).show()
@@ -1333,12 +1478,6 @@ fun WaveUnitsApp() {
                     sb.append("=== COLLECTED SHEETS ===\n")
                     collectedStudentAnswerSheets.forEachIndexed { i, s ->
                         sb.append("--- Student ${i + 1}: ${s.studentName} ---\n${s.extractedText}\n\n")
-                    }
-                }
-                if (markedAnswerSheets.isNotEmpty()) {
-                    sb.append("=== MARKED SHEETS ===\n")
-                    markedAnswerSheets.forEachIndexed { i, s ->
-                        sb.append("--- Student ${i + 1}: ${s.studentName} ---\n${s.markedText}\n\n")
                     }
                 }
                 aiAnswer = askAIWithContext(sb.toString(), question)
@@ -1465,14 +1604,11 @@ fun WaveUnitsApp() {
                             val newSheets = mutableListOf<StudentAnswerSheetData>()
                             for ((idx, uri) in uris.withIndex()) {
                                 progressText = "Transcribing page ${idx + 1} of ${uris.size}..."
-
                                 val printout = transcribeAnswerSheet(context, uri)
                                 val imgB64 = imageToBase64(context, uri)
-
                                 if (printout.isBlank() || printout.startsWith("ERR")) {
                                     Toast.makeText(context, "Transcribe failed: ${printout.take(200)}", Toast.LENGTH_LONG).show()
                                 }
-
                                 val studentName = when {
                                     isRosterMode && rosterNames.isNotEmpty() -> {
                                         val n = rosterNames.getOrNull(rosterIndex) ?: "Unknown"
@@ -1481,7 +1617,6 @@ fun WaveUnitsApp() {
                                     manualStudentName.isNotBlank() -> manualStudentName
                                     else -> "Unknown"
                                 }
-
                                 newSheets.add(StudentAnswerSheetData(
                                     studentName = studentName,
                                     extractedText = printout,
@@ -1526,6 +1661,153 @@ fun WaveUnitsApp() {
         if (isLoggedIn) { loadProjects(); loadSavedRosters() }
     }
 
+    // ===== DIALOGS =====
+    if (showAddGradeDialog) {
+        var selected by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showAddGradeDialog = false },
+            title = { Text("Add a Grade you teach") },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Text("Pick the grade level:", color = Color(0xFF94a3b8), fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    CBC_GRADES.forEach { g ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                                .clickable { selected = g },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (selected == g) Color(0xFF2563eb) else Color(0xFF1e293b)
+                            )
+                        ) {
+                            Text(g, color = Color.White, modifier = Modifier.padding(12.dp))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (selected.isNotBlank()) {
+                            // Verify by writing a tiny marker doc so the grade is remembered
+                            scope.launch {
+                                try {
+                                    db.collection("grades").document("${auth.currentUser?.uid}_$selected").set(mapOf(
+                                        "teacherId" to auth.currentUser?.uid,
+                                        "grade" to selected,
+                                        "createdAt" to System.currentTimeMillis()
+                                    ))
+                                    loadProjects()
+                                } catch (_: Exception) {}
+                            }
+                            showAddGradeDialog = false
+                            showAddSubjectDialog = true
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                ) { Text("Add") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddGradeDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showAddSubjectDialog) {
+        var selected by remember { mutableStateOf("") }
+        val existing = knownSubjectsByGrade[selectedGrade ?: ""] ?: emptyList()
+        AlertDialog(
+            onDismissRequest = { showAddSubjectDialog = false },
+            title = { Text("Add a Subject") },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Text("Pick the subject:", color = Color(0xFF94a3b8), fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    CBC_SUBJECTS.forEach { s ->
+                        if (s !in existing) {
+                            Card(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                                    .clickable { selected = s },
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (selected == s) Color(0xFF2563eb) else Color(0xFF1e293b)
+                                )
+                            ) {
+                                Text(s, color = Color.White, modifier = Modifier.padding(12.dp))
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (selected.isNotBlank() && selectedGrade != null) {
+                            selectedSubject = selected
+                            showAddSubjectDialog = false
+                            showNewExamDialog = true
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                ) { Text("Continue") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddSubjectDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showNewExamDialog) {
+        var title by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showNewExamDialog = false },
+            title = { Text("New Exam") },
+            text = {
+                Column {
+                    Text("${selectedGrade ?: ""} -> ${selectedSubject ?: ""}",
+                        color = Color(0xFF60a5fa), fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = title,
+                        onValueChange = { title = it },
+                        label = { Text("Exam Title") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (title.isNotBlank() && selectedGrade != null && selectedSubject != null) {
+                            scope.launch {
+                                try {
+                                    val doc = db.collection("exams").add(mapOf(
+                                        "teacherId" to auth.currentUser?.uid,
+                                        "title" to title,
+                                        "grade" to selectedGrade,
+                                        "subjectKey" to selectedSubject,
+                                        "status" to "created",
+                                        "createdAt" to System.currentTimeMillis()
+                                    )).await()
+                                    currentProjectId = doc.id
+                                    currentProjectTitle = title
+                                    loadProjects()
+                                    showNewExamDialog = false
+                                    currentView = "projects"
+                                    Toast.makeText(context, "Exam created", Toast.LENGTH_SHORT).show()
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "${e.message}", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                ) { Text("Create") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNewExamDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     MaterialTheme(
         colorScheme = darkColorScheme(
             primary = Color(0xFF2563eb),
@@ -1543,7 +1825,6 @@ fun WaveUnitsApp() {
                 ) {
                     Text("WaveUnits", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                     Spacer(modifier = Modifier.height(32.dp))
-
                     Button(
                         onClick = {
                             val signInIntent = googleSignInClient.signInIntent
@@ -1552,11 +1833,9 @@ fun WaveUnitsApp() {
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDB4437))
                     ) { Text("Sign in with Google") }
-
                     Spacer(modifier = Modifier.height(16.dp))
                     Text("— or —", color = Color(0xFF94a3b8), fontSize = 12.sp)
                     Spacer(modifier = Modifier.height(16.dp))
-
                     OutlinedTextField(value = email, onValueChange = { email = it },
                         label = { Text("Email") }, modifier = Modifier.fillMaxWidth())
                     Spacer(modifier = Modifier.height(8.dp))
@@ -1623,83 +1902,369 @@ fun WaveUnitsApp() {
             ) { padding ->
                 Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
                     when (currentView) {
-                        "projects" -> {
-                            Row(modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("My Exams", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                                Button(
-                                    onClick = { currentView = "create" },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                ) { Text("+ New Exam") }
-                            }
-                            Spacer(modifier = Modifier.height(16.dp))
-                            if (projects.isEmpty()) {
-                                Column(modifier = Modifier.fillMaxWidth().padding(32.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text("No exams yet", color = Color(0xFF94a3b8))
+                        "home" -> {
+                            // ===== FOLDER TREE HOME =====
+                            if (knownGrades.isEmpty()) {
+                                Column(
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.Center,
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text("??", fontSize = 48.sp)
+                                    Spacer(modifier = Modifier.height(16.dp))
+                                    Text("Welcome to WaveUnits", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text("Add the grades and subjects you teach to get started.",
+                                        color = Color(0xFF94a3b8), fontSize = 14.sp)
+                                    Spacer(modifier = Modifier.height(32.dp))
+                                    Button(
+                                        onClick = { showAddGradeDialog = true },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981)),
+                                        modifier = Modifier.fillMaxWidth(0.7f)
+                                    ) { Text("+ Add Subjects I Teach") }
                                 }
                             } else {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("My Classes", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                    Button(
+                                        onClick = { showAddGradeDialog = true },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                    ) { Text("+ Add") }
+                                }
+                                Spacer(modifier = Modifier.height(16.dp))
                                 LazyColumn {
-                                    items(projects) { project ->
+                                    val gradeList = knownGrades.ifEmpty { knownSubjectsByGrade.keys.sorted() }
+                                    items(gradeList) { grade ->
+                                        val subjects = knownSubjectsByGrade[grade] ?: emptyList()
                                         Card(
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                                                .clickable {
-                                                    currentProject = project
-                                                    currentProjectId = project.id
-                                                    currentProjectTitle = project.title
-                                                    currentView = "projectDetail"
-                                                    loadExamData(project.id)
-                                                },
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                             colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))
                                         ) {
                                             Column(modifier = Modifier.padding(16.dp)) {
-                                                Text(project.title, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                Text(project.subject, color = Color(0xFF94a3b8), fontSize = 14.sp)
-                                                Text("Created: ${project.createdAt}", color = Color(0xFF64748b), fontSize = 12.sp)
-                                                Text("Status: ${project.status}", color = Color(0xFF64748b), fontSize = 12.sp)
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween
+                                                ) {
+                                                    Text("?? $grade", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                    Button(
+                                                        onClick = {
+                                                            selectedGrade = grade
+                                                            showAddSubjectDialog = true
+                                                        },
+                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                                    ) { Text("+ Subject", fontSize = 12.sp) }
+                                                }
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                if (subjects.isEmpty()) {
+                                                    Text("No subjects yet. Tap + Subject.", color = Color(0xFF64748b), fontSize = 12.sp)
+                                                } else {
+                                                    subjects.forEach { subject ->
+                                                        val count = projects.count { it.grade == grade && it.subjectKey == subject }
+                                                        Card(
+                                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                                                                .clickable {
+                                                                    selectedGrade = grade
+                                                                    selectedSubject = subject
+                                                                    currentView = "subject"
+                                                                },
+                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))
+                                                        ) {
+                                                            Row(
+                                                                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                                verticalAlignment = Alignment.CenterVertically
+                                                            ) {
+                                                                Text("?? $subject", color = Color.White, fontSize = 14.sp)
+                                                                Text("$count exams", color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        "create" -> {
-                            var title by remember { mutableStateOf("") }
-                            var subject by remember { mutableStateOf("") }
-                            Text("Create Exam", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                            Spacer(modifier = Modifier.height(16.dp))
-                            OutlinedTextField(value = title, onValueChange = { title = it },
-                                label = { Text("Exam Title") }, modifier = Modifier.fillMaxWidth())
+                        "subject" -> {
+                            val grade = selectedGrade ?: ""
+                            val subject = selectedSubject ?: ""
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text("$grade", color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                    Text("?? $subject", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                }
+                                Row {
+                                    Button(
+                                        onClick = { showNewExamDialog = true },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                    ) { Text("+ New Exam") }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Button(
+                                        onClick = { currentView = "home" },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                    ) { Text("Back") }
+                                }
+                            }
                             Spacer(modifier = Modifier.height(8.dp))
-                            OutlinedTextField(value = subject, onValueChange = { subject = it },
-                                label = { Text("Subject") }, modifier = Modifier.fillMaxWidth())
+
+                            // Class Path analytics button
+                            Button(
+                                onClick = {
+                                    loadSeriesAnalytics(grade, subject)
+                                    currentView = "seriesAnalytics"
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                            ) { Text("?? Class Path Analytics") }
                             Spacer(modifier = Modifier.height(16.dp))
-                            Row(modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween) {
-                                Button(
-                                    onClick = {
-                                        scope.launch {
-                                            try {
-                                                val doc = db.collection("exams").add(mapOf(
-                                                    "teacherId" to auth.currentUser?.uid,
-                                                    "title" to title, "subject" to subject,
-                                                    "status" to "created",
-                                                    "createdAt" to System.currentTimeMillis()
-                                                )).await()
-                                                currentProjectId = doc.id
-                                                currentProjectTitle = title
-                                                loadProjects(); currentView = "projects"
-                                                Toast.makeText(context, "Created!", Toast.LENGTH_SHORT).show()
-                                            } catch (e: Exception) {
-                                                Toast.makeText(context, "${e.message}", Toast.LENGTH_LONG).show()
+
+                            val exams = projects.filter { it.grade == grade && it.subjectKey == subject }
+                                .sortedByDescending { it.createdAtMillis }
+
+                            if (exams.isEmpty()) {
+                                Text("No exams in this class path yet.", color = Color(0xFF94a3b8))
+                            } else {
+                                LazyColumn {
+                                    items(exams) { exam ->
+                                        Card(
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                                .clickable {
+                                                    currentProject = exam
+                                                    currentProjectId = exam.id
+                                                    currentProjectTitle = exam.title
+                                                    currentView = "projectDetail"
+                                                    loadExamData(exam.id)
+                                                    loadAIResponses(exam.id)
+                                                },
+                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))
+                                        ) {
+                                            Column(modifier = Modifier.padding(16.dp)) {
+                                                Text(exam.title, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                Text("Created: ${exam.createdAt}", color = Color(0xFF64748b), fontSize = 12.sp)
+                                                Text("Status: ${exam.status}", color = Color(0xFF64748b), fontSize = 12.sp)
                                             }
                                         }
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                ) { Text("Create") }
-                                Button(onClick = { currentView = "projects" },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                ) { Text("Back") }
+                                    }
+                                }
+                            }
+                        }
+                        "seriesAnalytics" -> {
+                            val s = seriesAnalytics
+                            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                item {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column {
+                                            Text("Class Path", color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                            Text("${s?.grade ?: ""} ? ${s?.subjectKey ?: ""}",
+                                                fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                        }
+                                        Button(
+                                            onClick = { currentView = "subject" },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                        ) { Text("Back") }
+                                    }
+                                    Spacer(modifier = Modifier.height(16.dp))
+                                }
+
+                                if (s == null || s.examCount == 0) {
+                                    item {
+                                        Text("No exams in this class path yet.", color = Color(0xFF94a3b8))
+                                    }
+                                } else {
+                                    item {
+                                        Card(
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))
+                                        ) {
+                                            Column(modifier = Modifier.padding(16.dp)) {
+                                                Text("Class Average", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                Text("${"%.1f".format(s.classAverage)}%", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                                Text(
+                                                    when {
+                                                        s.examCount < 2 -> "Need 2+ exams to show trend"
+                                                        s.classTrend > 3 -> "Trend: improving (+${"%.1f".format(s.classTrend)})"
+                                                        s.classTrend < -3 -> "Trend: declining (${"%.1f".format(s.classTrend)})"
+                                                        else -> "Trend: steady"
+                                                    },
+                                                    color = when {
+                                                        s.classTrend > 3 -> Color(0xFF10b981)
+                                                        s.classTrend < -3 -> Color(0xFFef4444)
+                                                        else -> Color(0xFF94a3b8)
+                                                    },
+                                                    fontSize = 13.sp
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    // Timeline
+                                    item {
+                                        Card(
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))
+                                        ) {
+                                            Column(modifier = Modifier.padding(16.dp)) {
+                                                Text("Timeline (newest first)", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                s.examPoints.forEach { ep ->
+                                                    Card(
+                                                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                                                            .clickable {
+                                                                currentProjectId = ep.examId
+                                                                currentProjectTitle = ep.examTitle
+                                                                currentView = "projectDetail"
+                                                                loadExamData(ep.examId)
+                                                                loadAIResponses(ep.examId)
+                                                            },
+                                                        colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))
+                                                    ) {
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Column(modifier = Modifier.weight(1f)) {
+                                                                Text(ep.examTitle, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                                                Text(formatTimestamp(ep.timestamp), color = Color(0xFF64748b), fontSize = 11.sp)
+                                                            }
+                                                            Column(horizontalAlignment = Alignment.End) {
+                                                                Text("${"%.1f".format(ep.classAverage)}%",
+                                                                    color = if (ep.classAverage >= 50) Color(0xFF10b981) else Color(0xFFef4444),
+                                                                    fontWeight = FontWeight.Bold)
+                                                                Text("${ep.studentCount} students", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Persistent weaknesses
+                                    val weakTopics = s.topicSeries.filter { it.isPersistentlyWeak }
+                                    if (weakTopics.isNotEmpty()) {
+                                        item {
+                                            Card(
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))
+                                            ) {
+                                                Column(modifier = Modifier.padding(16.dp)) {
+                                                    Text("?? Persistent Weaknesses", fontWeight = FontWeight.Bold, color = Color(0xFFef4444), fontSize = 16.sp)
+                                                    Text("Below 50% in every exam this year. Re-teach these.",
+                                                        color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    weakTopics.forEach { t ->
+                                                        Card(
+                                                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))
+                                                        ) {
+                                                            Column(modifier = Modifier.padding(12.dp)) {
+                                                                Text(t.topic, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                                                                Spacer(modifier = Modifier.height(4.dp))
+                                                                t.scores.sortedByDescending { it.first }.forEach { p ->
+                                                                    Text("${formatTimestamp(p.first)}  ${"%.1f".format(p.second)}%",
+                                                                        color = Color(0xFFef4444), fontSize = 12.sp)
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Per-student series
+                                    item {
+                                        Card(
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))
+                                        ) {
+                                            Column(modifier = Modifier.padding(16.dp)) {
+                                                Text("Student Progress", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                s.studentSeries.forEach { sp ->
+                                                    Card(
+                                                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                                        colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))
+                                                    ) {
+                                                        Column(modifier = Modifier.padding(12.dp)) {
+                                                            Row(
+                                                                modifier = Modifier.fillMaxWidth(),
+                                                                horizontalArrangement = Arrangement.SpaceBetween
+                                                            ) {
+                                                                Text(sp.studentName, color = Color.White, fontWeight = FontWeight.Medium)
+                                                                Text(
+                                                                    when {
+                                                                        sp.trend == "improving" -> "? +${"%.1f".format(sp.change)}"
+                                                                        sp.trend == "declining" -> "? ${"%.1f".format(sp.change)}"
+                                                                        sp.trend == "steady" -> "— steady"
+                                                                        else -> "—"
+                                                                    },
+                                                                    color = when (sp.trend) {
+                                                                        "improving" -> Color(0xFF10b981)
+                                                                        "declining" -> Color(0xFFef4444)
+                                                                        else -> Color(0xFF94a3b8)
+                                                                    },
+                                                                    fontSize = 12.sp,
+                                                                    fontWeight = FontWeight.Bold
+                                                                )
+                                                            }
+                                                            Spacer(modifier = Modifier.height(4.dp))
+                                                            sp.scores.sortedByDescending { it.first }.forEach { p ->
+                                                                Text("${formatTimestamp(p.first)}  ${"%.1f".format(p.second)}%",
+                                                                    color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Clusters
+                                    if (s.clusters.isNotEmpty()) {
+                                        item {
+                                            Card(
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))
+                                            ) {
+                                                Column(modifier = Modifier.padding(16.dp)) {
+                                                    Text("?? Small-Group Focus", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b), fontSize = 16.sp)
+                                                    Text("These students fail the same topic in every exam.",
+                                                        color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    s.clusters.forEach { c ->
+                                                        Card(
+                                                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))
+                                                        ) {
+                                                            Column(modifier = Modifier.padding(12.dp)) {
+                                                                Text(c.topic, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                                                                Text("Failed in all ${c.examCount} exams:",
+                                                                    color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                                c.students.forEach { n ->
+                                                                    Text("  • $n", color = Color.White, fontSize = 12.sp)
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         "projectDetail" -> {
@@ -1710,558 +2275,562 @@ fun WaveUnitsApp() {
                                     loadSavedRosters()
                                 }
                             }
-                            currentProject?.let { p ->
-                                Column(modifier = Modifier.fillMaxSize()) {
-                                    val nothingOpen = !sectionState.isDashboardOpen && !sectionState.isMarkedSheetsOpen &&
-                                        !sectionState.isQuestionPaperOpen && !sectionState.isAIAnswerSheetOpen &&
-                                        !sectionState.isManualAnswerSheetOpen && !sectionState.isCollectedSheetsOpen &&
-                                        !sectionState.isPrintableReportOpen && !sectionState.isRosterSetupOpen &&
-                                        !sectionState.isSavedRostersOpen && !sectionState.isAnswerSheetGeneratorOpen
-                                    if (nothingOpen) {
-                                        Row(modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween) {
-                                            Text(p.title, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                                            Button(onClick = { currentView = "projects" },
-                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                            ) { Text("Back") }
+                            val p = projects.find { it.id == currentProjectId }
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                val nothingOpen = !sectionState.isDashboardOpen && !sectionState.isMarkedSheetsOpen &&
+                                    !sectionState.isQuestionPaperOpen && !sectionState.isAIAnswerSheetOpen &&
+                                    !sectionState.isManualAnswerSheetOpen && !sectionState.isCollectedSheetsOpen &&
+                                    !sectionState.isPrintableReportOpen && !sectionState.isRosterSetupOpen &&
+                                    !sectionState.isSavedRostersOpen && !sectionState.isAnswerSheetGeneratorOpen
+                                if (nothingOpen) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column {
+                                            Text(p?.grade ?: "", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                            Text(currentProjectTitle, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                            Text(p?.subjectKey ?: "", color = Color(0xFF60a5fa), fontSize = 12.sp)
                                         }
-                                        Text(p.subject, color = Color(0xFF94a3b8))
-                                        Text("Created: ${p.createdAt}", color = Color(0xFF64748b), fontSize = 12.sp)
-                                        Text("Status: ${p.status}", color = Color(0xFF64748b), fontSize = 12.sp)
-                                        Spacer(modifier = Modifier.height(16.dp))
-
                                         Button(
-                                            onClick = {
-                                                sectionState = sectionState.copy(isDashboardOpen = true)
-                                                loadAIResponses(currentProjectId)
-                                            },
+                                            onClick = { currentView = "subject" },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                        ) { Text("Back") }
+                                    }
+                                    Spacer(modifier = Modifier.height(16.dp))
+
+                                    Button(
+                                        onClick = {
+                                            sectionState = sectionState.copy(isDashboardOpen = true)
+                                            loadAIResponses(currentProjectId)
+                                        },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                                    ) { Text("Data Dashboard") }
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    if (collectedStudentAnswerSheets.isNotEmpty()) {
+                                        Button(
+                                            onClick = { gradeCollectedSheets() },
                                             modifier = Modifier.fillMaxWidth(),
-                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                        ) { Text("Data Dashboard") }
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
+                                        ) { Text(if (isGrading) "Grading..." else "Grade Collected Sheets (${collectedStudentAnswerSheets.size})") }
                                         Spacer(modifier = Modifier.height(8.dp))
-
-                                        if (collectedStudentAnswerSheets.isNotEmpty()) {
-                                            Button(
-                                                onClick = { gradeCollectedSheets() },
-                                                modifier = Modifier.fillMaxWidth(),
-                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                            ) { Text(if (isGrading) "Grading..." else "Grade Collected Sheets (${collectedStudentAnswerSheets.size})") }
-                                            Spacer(modifier = Modifier.height(8.dp))
-                                        }
-                                        if (markedAnswerSheets.isNotEmpty()) {
-                                            Button(
-                                                onClick = { sectionState = sectionState.copy(isMarkedSheetsOpen = true) },
-                                                modifier = Modifier.fillMaxWidth(),
-                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                            ) { Text("Marked Sheets (${markedAnswerSheets.size})") }
-                                            Spacer(modifier = Modifier.height(8.dp))
-                                        }
+                                    }
+                                    if (markedAnswerSheets.isNotEmpty()) {
                                         Button(
-                                            onClick = {
-                                                currentView = "analytics"
-                                                loadAdvancedAnalytics()
-                                                loadPreviousExamTopicPerformance(currentProjectId)
-                                            },
+                                            onClick = { sectionState = sectionState.copy(isMarkedSheetsOpen = true) },
                                             modifier = Modifier.fillMaxWidth(),
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                        ) { Text("View Analytics") }
+                                        ) { Text("Marked Sheets (${markedAnswerSheets.size})") }
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                    }
+                                    Button(
+                                        onClick = {
+                                            currentView = "examAnalytics"
+                                            loadExamAnalytics(currentProjectId)
+                                        },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                    ) { Text("View Exam Analytics") }
+                                    Spacer(modifier = Modifier.height(16.dp))
+
+                                    if (isExtracting) {
+                                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
+                                            Column(modifier = Modifier.padding(16.dp),
+                                                horizontalAlignment = Alignment.CenterHorizontally) {
+                                                CircularProgressIndicator()
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Text(progressText.ifBlank { "Working..." }, color = Color(0xFF94a3b8))
+                                            }
+                                        }
                                         Spacer(modifier = Modifier.height(16.dp))
+                                    }
 
-                                        if (isExtracting) {
-                                            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
-                                                Column(modifier = Modifier.padding(16.dp),
-                                                    horizontalAlignment = Alignment.CenterHorizontally) {
-                                                    CircularProgressIndicator()
-                                                    Spacer(modifier = Modifier.height(8.dp))
-                                                    Text(progressText.ifBlank { "Working..." }, color = Color(0xFF94a3b8))
-                                                }
-                                            }
-                                            Spacer(modifier = Modifier.height(16.dp))
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isRosterSetupOpen = true) },
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                                            ) { Text("Set Up Class Roster") }
                                         }
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isSavedRostersOpen = true); loadSavedRosters() },
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                            ) { Text("Saved Rosters (${savedRosters.size})") }
+                                        }
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isAnswerSheetGeneratorOpen = true) },
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                            ) { Text("Generate Answer Sheet") }
+                                        }
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isQuestionPaperOpen = true) },
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                                            ) { Text("Question Paper") }
+                                        }
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isAIAnswerSheetOpen = true) },
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                            ) { Text("AI Answer Sheet") }
+                                        }
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isManualAnswerSheetOpen = true) },
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
+                                            ) { Text("Manual Answer Sheet") }
+                                        }
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isCollectedSheetsOpen = true) },
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                            ) { Text("Collected Sheets (${collectedStudentAnswerSheets.size})") }
+                                        }
+                                        item {
+                                            Button(
+                                                onClick = {
+                                                    scope.launch {
+                                                        try {
+                                                            db.collection("exams").document(currentProjectId).delete().await()
+                                                            loadProjects()
+                                                            currentView = "subject"
+                                                        } catch (e: Exception) {}
+                                                    }
+                                                },
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
+                                            ) { Text("Delete Exam") }
+                                        }
+                                    }
+                                }
 
-                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isRosterSetupOpen = true) },
-                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                                ) { Text("Set Up Class Roster") }
-                                            }
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isSavedRostersOpen = true); loadSavedRosters() },
-                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("Saved Rosters (${savedRosters.size})") }
-                                            }
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isAnswerSheetGeneratorOpen = true) },
-                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("Generate Answer Sheet") }
-                                            }
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isQuestionPaperOpen = true) },
-                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                                ) { Text("Question Paper") }
-                                            }
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isAIAnswerSheetOpen = true) },
-                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("AI Answer Sheet") }
-                                            }
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isManualAnswerSheetOpen = true) },
-                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                if (sectionState.isAnswerSheetGeneratorOpen) {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isAnswerSheetGeneratorOpen = false) },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                            ) { Text("Back") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text("Generate Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            OutlinedTextField(value = answerSheetQuestionCount,
+                                                onValueChange = { answerSheetQuestionCount = it },
+                                                label = { Text("Number of Questions") },
+                                                modifier = Modifier.fillMaxWidth())
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Button(
+                                                onClick = {
+                                                    val count = answerSheetQuestionCount.toIntOrNull() ?: 20
+                                                    generatedAnswerSheetText = generateAnswerSheetTemplate(count)
+                                                    Toast.makeText(context, "Generated!", Toast.LENGTH_SHORT).show()
+                                                },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                            ) { Text("Generate") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            if (generatedAnswerSheetText.isNotBlank()) {
+                                                Text("Preview:", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                Text(generatedAnswerSheetText, color = Color.White, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Button(onClick = { saveReportToDownloads(generatedAnswerSheetText) },
+                                                    modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                                ) { Text("Manual Answer Sheet") }
-                                            }
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isCollectedSheetsOpen = true) },
-                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("Collected Sheets (${collectedStudentAnswerSheets.size})") }
-                                            }
-                                            item {
-                                                Button(
-                                                    onClick = {
-                                                        scope.launch {
-                                                            try {
-                                                                db.collection("exams").document(currentProjectId).delete().await()
-                                                                loadProjects(); currentView = "projects"
-                                                            } catch (e: Exception) {}
-                                                        }
-                                                    },
-                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
-                                                ) { Text("Delete Exam") }
-                                            }
-                                        }
-                                    }
-
-                                    if (sectionState.isAnswerSheetGeneratorOpen) {
-                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isAnswerSheetGeneratorOpen = false) },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("Back") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Text("Generate Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                OutlinedTextField(value = answerSheetQuestionCount,
-                                                    onValueChange = { answerSheetQuestionCount = it },
-                                                    label = { Text("Number of Questions") },
-                                                    modifier = Modifier.fillMaxWidth())
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Button(
-                                                    onClick = {
-                                                        val count = answerSheetQuestionCount.toIntOrNull() ?: 20
-                                                        generatedAnswerSheetText = generateAnswerSheetTemplate(count)
-                                                        Toast.makeText(context, "Generated!", Toast.LENGTH_SHORT).show()
-                                                    },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("Generate") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                if (generatedAnswerSheetText.isNotBlank()) {
-                                                    Text("Preview:", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                    Text(generatedAnswerSheetText, color = Color.White, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
-                                                    Spacer(modifier = Modifier.height(8.dp))
-                                                    Button(onClick = { saveReportToDownloads(generatedAnswerSheetText) },
-                                                        modifier = Modifier.fillMaxWidth(),
-                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                                    ) { Text("Save to Downloads") }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    if (sectionState.isRosterSetupOpen) {
-                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isRosterSetupOpen = false) },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("Back") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Text("Class Roster", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                OutlinedTextField(value = rosterInput, onValueChange = { rosterInput = it },
-                                                    label = { Text("Names separated by commas") },
-                                                    modifier = Modifier.fillMaxWidth(), minLines = 3)
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                OutlinedTextField(value = rosterTemplateName, onValueChange = { rosterTemplateName = it },
-                                                    label = { Text("Template Name") }, modifier = Modifier.fillMaxWidth())
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Button(
-                                                    onClick = {
-                                                        rosterNames = rosterInput.split(",").map { it.trim() }.filter { it.isNotBlank() }
-                                                        rosterIndex = 0; isRosterMode = true
-                                                        Toast.makeText(context, "Loaded ${rosterNames.size}", Toast.LENGTH_SHORT).show()
-                                                        sectionState = sectionState.copy(isRosterSetupOpen = false)
-                                                    },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("Use This Roster") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Button(
-                                                    onClick = {
-                                                        rosterNames = rosterInput.split(",").map { it.trim() }.filter { it.isNotBlank() }
-                                                        saveRosterTemplate(rosterTemplateName, rosterNames)
-                                                    },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                                ) { Text("Save as Template") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                if (rosterNames.isNotEmpty()) {
-                                                    Text("Current Roster (${rosterNames.size}):", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                    rosterNames.forEachIndexed { i, n -> Text("${i + 1}. $n", color = Color.White, fontSize = 12.sp) }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    if (sectionState.isSavedRostersOpen) {
-                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isSavedRostersOpen = false) },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("Back") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Text("Saved Rosters", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                if (savedRosters.isEmpty()) {
-                                                    Text("None yet.", color = Color(0xFF94a3b8))
-                                                } else {
-                                                    savedRosters.forEach { r ->
-                                                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
-                                                            Column(modifier = Modifier.padding(16.dp)) {
-                                                                Row(modifier = Modifier.fillMaxWidth(),
-                                                                    horizontalArrangement = Arrangement.SpaceBetween) {
-                                                                    Text(r.name, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                                    Row {
-                                                                        Button(
-                                                                            onClick = {
-                                                                                rosterNames = r.names
-                                                                                rosterIndex = 0; isRosterMode = true
-                                                                                sectionState = sectionState.copy(isSavedRostersOpen = false)
-                                                                            },
-                                                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                                        ) { Text("Use") }
-                                                                        Spacer(modifier = Modifier.width(8.dp))
-                                                                        Button(onClick = { deleteRosterTemplate(r.id) },
-                                                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
-                                                                        ) { Text("X") }
-                                                                    }
-                                                                }
-                                                                Text("${r.names.size} students", color = Color(0xFF94a3b8), fontSize = 12.sp)
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    if (sectionState.isDashboardOpen) {
-                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isDashboardOpen = false) },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("Back") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
-                                                    Column(modifier = Modifier.padding(16.dp)) {
-                                                        Text("Ask AI", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                        Spacer(modifier = Modifier.height(8.dp))
-                                                        OutlinedTextField(value = aiQuestion, onValueChange = { aiQuestion = it },
-                                                            label = { Text("Your question...") },
-                                                            modifier = Modifier.fillMaxWidth(), minLines = 2)
-                                                        Spacer(modifier = Modifier.height(8.dp))
-                                                        Button(onClick = { askAIQuestion(aiQuestion) },
-                                                            modifier = Modifier.fillMaxWidth(),
-                                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                        ) { Text(if (isAIThinking) "Thinking..." else "Ask") }
-                                                        if (aiAnswer.isNotBlank()) {
-                                                            Spacer(modifier = Modifier.height(12.dp))
-                                                            Card(modifier = Modifier.fillMaxWidth(),
-                                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
-                                                                Column(modifier = Modifier.padding(16.dp)) {
-                                                                    Text("Response:", fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
-                                                                    Text(aiAnswer, color = Color.White, fontSize = 14.sp)
-                                                                    Spacer(modifier = Modifier.height(8.dp))
-                                                                    Row {
-                                                                        Button(onClick = { saveAIResponse(aiQuestion, aiAnswer) },
-                                                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                                        ) { Text("Save") }
-                                                                        Spacer(modifier = Modifier.width(8.dp))
-                                                                        Button(onClick = { aiAnswer = ""; aiQuestion = "" },
-                                                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
-                                                                        ) { Text("Clear") }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                        if (savedAIResponses.isNotEmpty()) {
-                                                            Spacer(modifier = Modifier.height(12.dp))
-                                                            Text("Saved:", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                            savedAIResponses.forEach { r ->
-                                                                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
-                                                                    Column(modifier = Modifier.padding(12.dp)) {
-                                                                        Text("Q: ${r.question}", color = Color(0xFF60a5fa), fontSize = 12.sp)
-                                                                        Text("A: ${r.answer}", color = Color.White, fontSize = 12.sp)
-                                                                        Row {
-                                                                            Button(onClick = { aiQuestion = r.question; aiAnswer = r.answer },
-                                                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                                                            ) { Text("View") }
-                                                                            Spacer(modifier = Modifier.width(8.dp))
-                                                                            Button(onClick = { deleteAIResponse(r.id) },
-                                                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
-                                                                            ) { Text("Delete") }
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    } else if (sectionState.isPrintableReportOpen) {
-                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isPrintableReportOpen = false) },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("Back") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Text("Printable Report", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Text(printableReportText, color = Color.White, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-                                                Spacer(modifier = Modifier.height(16.dp))
-                                                Button(onClick = { saveReportToDownloads(printableReportText) },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
                                                 ) { Text("Save to Downloads") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Button(onClick = { shareReport(printableReportText) },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                                ) { Text("Share") }
                                             }
                                         }
-                                    } else if (sectionState.isMarkedSheetsOpen) {
-                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isMarkedSheetsOpen = false) },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("Back") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Text("Marked Sheets", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Button(
-                                                    onClick = {
-                                                        printableReportText = generatePrintableMarkedSheets(markedAnswerSheets)
-                                                        sectionState = sectionState.copy(isPrintableReportOpen = true)
-                                                    },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                                ) { Text("Printable Report") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                markedAnswerSheets.forEach { sheet ->
+                                    }
+                                }
+
+                                if (sectionState.isRosterSetupOpen) {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isRosterSetupOpen = false) },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                            ) { Text("Back") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text("Class Roster", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            OutlinedTextField(value = rosterInput, onValueChange = { rosterInput = it },
+                                                label = { Text("Names separated by commas") },
+                                                modifier = Modifier.fillMaxWidth(), minLines = 3)
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            OutlinedTextField(value = rosterTemplateName, onValueChange = { rosterTemplateName = it },
+                                                label = { Text("Template Name") }, modifier = Modifier.fillMaxWidth())
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Button(
+                                                onClick = {
+                                                    rosterNames = rosterInput.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                                                    rosterIndex = 0; isRosterMode = true
+                                                    Toast.makeText(context, "Loaded ${rosterNames.size}", Toast.LENGTH_SHORT).show()
+                                                    sectionState = sectionState.copy(isRosterSetupOpen = false)
+                                                },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                            ) { Text("Use This Roster") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Button(
+                                                onClick = {
+                                                    rosterNames = rosterInput.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                                                    saveRosterTemplate(rosterTemplateName, rosterNames)
+                                                },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                                            ) { Text("Save as Template") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            if (rosterNames.isNotEmpty()) {
+                                                Text("Current Roster (${rosterNames.size}):", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                rosterNames.forEachIndexed { i, n -> Text("${i + 1}. $n", color = Color.White, fontSize = 12.sp) }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (sectionState.isSavedRostersOpen) {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isSavedRostersOpen = false) },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                            ) { Text("Back") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text("Saved Rosters", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            if (savedRosters.isEmpty()) {
+                                                Text("None yet.", color = Color(0xFF94a3b8))
+                                            } else {
+                                                savedRosters.forEach { r ->
                                                     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                         colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                         Column(modifier = Modifier.padding(16.dp)) {
-                                                            Text("Student: ${sheet.studentName}", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                            Text("${sheet.score}/${sheet.total} (${"%.1f".format(sheet.percentage)}%) | ${getKenyanGrade(sheet.percentage)}",
-                                                                color = Color.White, fontSize = 16.sp)
-                                                            Spacer(modifier = Modifier.height(8.dp))
-                                                            Text(sheet.markedText, color = Color.White, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                                                            Spacer(modifier = Modifier.height(8.dp))
-                                                            val bmp = remember(sheet.image) { decodeBase64(sheet.image) }
-                                                            bmp?.let {
-                                                                Image(it.asImageBitmap(), null,
-                                                                    modifier = Modifier.fillMaxWidth().height(200.dp))
+                                                            Row(modifier = Modifier.fillMaxWidth(),
+                                                                horizontalArrangement = Arrangement.SpaceBetween) {
+                                                                Text(r.name, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                                Row {
+                                                                    Button(
+                                                                        onClick = {
+                                                                            rosterNames = r.names
+                                                                            rosterIndex = 0; isRosterMode = true
+                                                                            sectionState = sectionState.copy(isSavedRostersOpen = false)
+                                                                        },
+                                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                                                    ) { Text("Use") }
+                                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                                    Button(onClick = { deleteRosterTemplate(r.id) },
+                                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
+                                                                    ) { Text("X") }
+                                                                }
+                                                            }
+                                                            Text("${r.names.size} students", color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (sectionState.isDashboardOpen) {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isDashboardOpen = false) },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                            ) { Text("Back") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
+                                                Column(modifier = Modifier.padding(16.dp)) {
+                                                    Text("Ask AI", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    OutlinedTextField(value = aiQuestion, onValueChange = { aiQuestion = it },
+                                                        label = { Text("Your question...") },
+                                                        modifier = Modifier.fillMaxWidth(), minLines = 2)
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    Button(onClick = { askAIQuestion(aiQuestion) },
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                                    ) { Text(if (isAIThinking) "Thinking..." else "Ask") }
+                                                    if (aiAnswer.isNotBlank()) {
+                                                        Spacer(modifier = Modifier.height(12.dp))
+                                                        Card(modifier = Modifier.fillMaxWidth(),
+                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
+                                                            Column(modifier = Modifier.padding(16.dp)) {
+                                                                Text("Response:", fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                                                Text(aiAnswer, color = Color.White, fontSize = 14.sp)
+                                                                Spacer(modifier = Modifier.height(8.dp))
+                                                                Row {
+                                                                    Button(onClick = { saveAIResponse(aiQuestion, aiAnswer) },
+                                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                                                    ) { Text("Save") }
+                                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                                    Button(onClick = { aiAnswer = ""; aiQuestion = "" },
+                                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
+                                                                    ) { Text("Clear") }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if (savedAIResponses.isNotEmpty()) {
+                                                        Spacer(modifier = Modifier.height(12.dp))
+                                                        Text("Saved:", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                        savedAIResponses.forEach { r ->
+                                                            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
+                                                                Column(modifier = Modifier.padding(12.dp)) {
+                                                                    Text("Q: ${r.question}", color = Color(0xFF60a5fa), fontSize = 12.sp)
+                                                                    Text("A: ${r.answer}", color = Color.White, fontSize = 12.sp)
+                                                                    Row {
+                                                                        Button(onClick = { aiQuestion = r.question; aiAnswer = r.answer },
+                                                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                                                                        ) { Text("View") }
+                                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                                        Button(onClick = { deleteAIResponse(r.id) },
+                                                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
+                                                                        ) { Text("Delete") }
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                    } else if (sectionState.isQuestionPaperOpen) {
-                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isQuestionPaperOpen = false) },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("Back") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Text("Question Paper", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Button(onClick = { launchScan("question_paper") },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                                ) { Text("Add Question Paper") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                if (questionPaperText.isNotBlank()) {
-                                                    Text("Extracted Text:", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                    Text(questionPaperText, color = Color.White, fontSize = 12.sp)
-                                                }
-                                            }
+                                    }
+                                } else if (sectionState.isPrintableReportOpen) {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isPrintableReportOpen = false) },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                            ) { Text("Back") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text("Printable Report", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text(printableReportText, color = Color.White, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                                            Spacer(modifier = Modifier.height(16.dp))
+                                            Button(onClick = { saveReportToDownloads(printableReportText) },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                            ) { Text("Save to Downloads") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Button(onClick = { shareReport(printableReportText) },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                                            ) { Text("Share") }
                                         }
-                                    } else if (sectionState.isAIAnswerSheetOpen) {
-                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isAIAnswerSheetOpen = false) },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("Back") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Text("AI Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                if (simplifiedAnswerKey.isNotBlank()) {
-                                                    Text("Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                                    Text(simplifiedAnswerKey, color = Color.White, fontSize = 12.sp)
-                                                }
-                                                if (aiAnswerSheet.isNotBlank()) {
-                                                    Spacer(modifier = Modifier.height(8.dp))
-                                                    Text("Full:", fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
-                                                    Text(aiAnswerSheet, color = Color.White, fontSize = 12.sp)
-                                                }
-                                            }
-                                        }
-                                    } else if (sectionState.isManualAnswerSheetOpen) {
-                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isManualAnswerSheetOpen = false) },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("Back") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Text("Manual Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Button(onClick = { launchScan("manual_answer_sheet") },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                                ) { Text("Add") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                if (manualAnswerKey.isNotBlank()) {
-                                                    Text("Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                                    Text(manualAnswerKey, color = Color.White, fontSize = 12.sp)
-                                                }
-                                                if (manualAnswerSheetText.isNotBlank()) {
-                                                    Spacer(modifier = Modifier.height(8.dp))
-                                                    Text("Text:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                                    Text(manualAnswerSheetText, color = Color.White, fontSize = 12.sp)
-                                                }
-                                            }
-                                        }
-                                    } else if (sectionState.isCollectedSheetsOpen) {
-                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                            item {
-                                                Button(onClick = { sectionState = sectionState.copy(isCollectedSheetsOpen = false) },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                                ) { Text("Back") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Text("Collected Sheets (${collectedStudentAnswerSheets.size})",
-                                                    fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                OutlinedTextField(value = manualStudentName, onValueChange = { manualStudentName = it },
-                                                    label = { Text("Student Name (optional)") }, modifier = Modifier.fillMaxWidth())
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Button(onClick = { launchScan("answer_sheets") },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                ) { Text("Add Answer Sheets") }
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                            }
-                                            items(collectedStudentAnswerSheets) { sheet ->
-                                                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                    }
+                                } else if (sectionState.isMarkedSheetsOpen) {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isMarkedSheetsOpen = false) },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                            ) { Text("Back") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text("Marked Sheets", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Button(
+                                                onClick = {
+                                                    printableReportText = generatePrintableMarkedSheets(markedAnswerSheets)
+                                                    sectionState = sectionState.copy(isPrintableReportOpen = true)
+                                                },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
+                                            ) { Text("Printable Report") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            markedAnswerSheets.forEach { sheet ->
+                                                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                     Column(modifier = Modifier.padding(16.dp)) {
-                                                        Text("Student: ${sheet.studentName}", fontWeight = FontWeight.Bold,
-                                                            color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                        Text("Student: ${sheet.studentName}", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                        Text("${sheet.score}/${sheet.total} (${"%.1f".format(sheet.percentage)}%) | ${getKenyanGrade(sheet.percentage)}",
+                                                            color = Color.White, fontSize = 16.sp)
+                                                        Spacer(modifier = Modifier.height(8.dp))
+                                                        Text(sheet.markedText, color = Color.White, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                                                         Spacer(modifier = Modifier.height(8.dp))
                                                         val bmp = remember(sheet.image) { decodeBase64(sheet.image) }
                                                         bmp?.let {
                                                             Image(it.asImageBitmap(), null,
-                                                                modifier = Modifier.fillMaxWidth().height(250.dp))
+                                                                modifier = Modifier.fillMaxWidth().height(200.dp))
                                                         }
-                                                        Spacer(modifier = Modifier.height(8.dp))
-                                                        Text("Printout (source of truth):",
-                                                            fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b), fontSize = 12.sp)
-                                                        Card(modifier = Modifier.fillMaxWidth(),
-                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
-                                                            Text(
-                                                                text = sheet.extractedText.ifBlank { "[No printout]" },
-                                                                color = if (sheet.extractedText.startsWith("ERR")) Color(0xFFef4444) else Color(0xFF10b981),
-                                                                fontSize = 9.sp,
-                                                                fontFamily = FontFamily.Monospace,
-                                                                modifier = Modifier.padding(8.dp)
-                                                                    .horizontalScroll(rememberScrollState())
-                                                            )
-                                                        }
-                                                        Spacer(modifier = Modifier.height(8.dp))
-                                                        Button(
-                                                            onClick = {
-                                                                try {
-                                                                    val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                                                                    if (!dir.exists()) dir.mkdirs()
-                                                                    val f = File(dir, "Printout_${sheet.studentName}_${System.currentTimeMillis()}.txt")
-                                                                    FileWriter(f).use { it.write(sheet.extractedText) }
-                                                                    Toast.makeText(context, "Saved: ${f.name}", Toast.LENGTH_LONG).show()
-                                                                } catch (e: Exception) {
-                                                                    Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                                                                }
-                                                            },
-                                                            modifier = Modifier.fillMaxWidth(),
-                                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                                        ) { Text("Save Printout") }
                                                     }
                                                 }
                                             }
-                                            item {
-                                                Spacer(modifier = Modifier.height(16.dp))
-                                                Button(
-                                                    onClick = {
-                                                        scope.launch {
-                                                            try {
-                                                                db.collection("exams").document(currentProjectId).update(mapOf(
-                                                                    "studentAnswerSheets" to emptyList<Map<String, Any>>()))
-                                                                collectedStudentAnswerSheets = emptyList()
-                                                                loadExamData(currentProjectId)
-                                                            } catch (e: Exception) {}
-                                                        }
-                                                    },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
-                                                ) { Text("Delete All") }
+                                        }
+                                    }
+                                } else if (sectionState.isQuestionPaperOpen) {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isQuestionPaperOpen = false) },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                            ) { Text("Back") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text("Question Paper", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Button(onClick = { launchScan("question_paper") },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                                            ) { Text("Add Question Paper") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            if (questionPaperText.isNotBlank()) {
+                                                Text("Extracted Text:", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                Text(questionPaperText, color = Color.White, fontSize = 12.sp)
                                             }
+                                        }
+                                    }
+                                } else if (sectionState.isAIAnswerSheetOpen) {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isAIAnswerSheetOpen = false) },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                            ) { Text("Back") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text("AI Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            if (simplifiedAnswerKey.isNotBlank()) {
+                                                Text("Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                                Text(simplifiedAnswerKey, color = Color.White, fontSize = 12.sp)
+                                            }
+                                            if (aiAnswerSheet.isNotBlank()) {
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Text("Full:", fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                                Text(aiAnswerSheet, color = Color.White, fontSize = 12.sp)
+                                            }
+                                        }
+                                    }
+                                } else if (sectionState.isManualAnswerSheetOpen) {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isManualAnswerSheetOpen = false) },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                            ) { Text("Back") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text("Manual Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Button(onClick = { launchScan("manual_answer_sheet") },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
+                                            ) { Text("Add") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            if (manualAnswerKey.isNotBlank()) {
+                                                Text("Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                                Text(manualAnswerKey, color = Color.White, fontSize = 12.sp)
+                                            }
+                                            if (manualAnswerSheetText.isNotBlank()) {
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Text("Text:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                                Text(manualAnswerSheetText, color = Color.White, fontSize = 12.sp)
+                                            }
+                                        }
+                                    }
+                                } else if (sectionState.isCollectedSheetsOpen) {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        item {
+                                            Button(onClick = { sectionState = sectionState.copy(isCollectedSheetsOpen = false) },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                            ) { Text("Back") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text("Collected Sheets (${collectedStudentAnswerSheets.size})",
+                                                fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            OutlinedTextField(value = manualStudentName, onValueChange = { manualStudentName = it },
+                                                label = { Text("Student Name (optional)") }, modifier = Modifier.fillMaxWidth())
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Button(onClick = { launchScan("answer_sheets") },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                            ) { Text("Add Answer Sheets") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                        }
+                                        items(collectedStudentAnswerSheets) { sheet ->
+                                            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
+                                                Column(modifier = Modifier.padding(16.dp)) {
+                                                    Text("Student: ${sheet.studentName}", fontWeight = FontWeight.Bold,
+                                                        color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    val bmp = remember(sheet.image) { decodeBase64(sheet.image) }
+                                                    bmp?.let {
+                                                        Image(it.asImageBitmap(), null,
+                                                            modifier = Modifier.fillMaxWidth().height(250.dp))
+                                                    }
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    Text("Printout (source of truth):",
+                                                        fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b), fontSize = 12.sp)
+                                                    Card(modifier = Modifier.fillMaxWidth(),
+                                                        colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
+                                                        Text(
+                                                            text = sheet.extractedText.ifBlank { "[No printout]" },
+                                                            color = if (sheet.extractedText.startsWith("ERR")) Color(0xFFef4444) else Color(0xFF10b981),
+                                                            fontSize = 9.sp,
+                                                            fontFamily = FontFamily.Monospace,
+                                                            modifier = Modifier.padding(8.dp)
+                                                                .horizontalScroll(rememberScrollState())
+                                                        )
+                                                    }
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    Button(
+                                                        onClick = {
+                                                            try {
+                                                                val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                                                                if (!dir.exists()) dir.mkdirs()
+                                                                val f = File(dir, "Printout_${sheet.studentName}_${System.currentTimeMillis()}.txt")
+                                                                FileWriter(f).use { it.write(sheet.extractedText) }
+                                                                Toast.makeText(context, "Saved: ${f.name}", Toast.LENGTH_LONG).show()
+                                                            } catch (e: Exception) {
+                                                                Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                                            }
+                                                        },
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
+                                                    ) { Text("Save Printout") }
+                                                }
+                                            }
+                                        }
+                                        item {
+                                            Spacer(modifier = Modifier.height(16.dp))
+                                            Button(
+                                                onClick = {
+                                                    scope.launch {
+                                                        try {
+                                                            db.collection("exams").document(currentProjectId).update(mapOf(
+                                                                "studentAnswerSheets" to emptyList<Map<String, Any>>()))
+                                                            collectedStudentAnswerSheets = emptyList()
+                                                            loadExamData(currentProjectId)
+                                                        } catch (e: Exception) {}
+                                                    }
+                                                },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
+                                            ) { Text("Delete All") }
                                         }
                                     }
                                 }
                             }
                         }
-                        "analytics" -> {
+                        "examAnalytics" -> {
                             LaunchedEffect(currentProjectId) {
-                                loadAdvancedAnalytics()
-                                loadPreviousExamTopicPerformance(currentProjectId)
+                                loadExamAnalytics(currentProjectId)
                             }
                             if (selectedStudent != null) {
                                 val s = selectedStudent!!
                                 Column(modifier = Modifier.fillMaxSize()) {
-                                    Row(modifier = Modifier.fillMaxWidth(),
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically) {
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
                                         Text("Student: ${s.name}", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                         Button(onClick = { selectedStudent = null },
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
@@ -2298,10 +2867,12 @@ fun WaveUnitsApp() {
                                 }
                             } else {
                                 Column(modifier = Modifier.fillMaxSize()) {
-                                    Row(modifier = Modifier.fillMaxWidth(),
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically) {
-                                        Text("Analytics", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("Exam Analytics", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                         Button(onClick = { currentView = "projectDetail" },
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
                                         ) { Text("Back") }
@@ -2389,8 +2960,6 @@ fun WaveUnitsApp() {
                                                     }
                                                 }
                                             }
-
-                                            // ===== Question-by-Question Analysis =====
                                             item {
                                                 Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
@@ -2403,92 +2972,64 @@ fun WaveUnitsApp() {
                                                         Spacer(modifier = Modifier.height(12.dp))
 
                                                         if (a.questionBreakdown.isEmpty()) {
-                                                            Text("No per-question data yet. Re-grade the sheets.",
+                                                            Text("No per-question data. Re-grade the sheets.",
                                                                 color = Color(0xFFf59e0b), fontSize = 12.sp)
                                                         } else {
                                                             val topicCounts = a.questionBreakdown.groupingBy { it.topic }.eachCount()
-
                                                             a.questionBreakdown.forEach { q ->
                                                                 val failedStudents = allResults
-                                                                    .filter { student ->
-                                                                        student.questions.any { qr ->
-                                                                            qr.questionNumber == q.questionNumber && !qr.isCorrect
-                                                                        }
-                                                                    }
+                                                                    .filter { st -> st.questions.any { qr -> qr.questionNumber == q.questionNumber && !qr.isCorrect } }
                                                                     .map { it.studentName }
                                                                     .sorted()
-
-                                                                val parts = q.difficulty.split(" · ")
+                                                                val parts = q.difficulty.split(" | ")
                                                                 val diffLabel = parts.getOrNull(0) ?: q.difficulty
                                                                 val correctPart = parts.getOrNull(1) ?: "${q.correctCount}/${q.totalCount} correct"
                                                                 val failCount = q.totalCount - q.correctCount
-
                                                                 val color = when (diffLabel) {
                                                                     "Easy" -> Color(0xFF10b981)
                                                                     "Moderate" -> Color(0xFFf59e0b)
                                                                     else -> Color(0xFFef4444)
                                                                 }
-
                                                                 var expanded by remember { mutableStateOf(false) }
-
                                                                 Card(
-                                                                    modifier = Modifier
-                                                                        .fillMaxWidth()
-                                                                        .padding(vertical = 4.dp)
+                                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
                                                                         .clickable { expanded = !expanded },
                                                                     colors = CardDefaults.cardColors(
                                                                         containerColor = if (expanded) Color(0xFF16213f) else Color(0xFF0f172a)
                                                                     )
                                                                 ) {
                                                                     Column(modifier = Modifier.padding(12.dp)) {
-                                                                        Row(
-                                                                            modifier = Modifier.fillMaxWidth(),
-                                                                            horizontalArrangement = Arrangement.SpaceBetween
-                                                                        ) {
-                                                                            Text("Q${q.questionNumber}",
-                                                                                fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 14.sp)
-                                                                            Text(diffLabel,
-                                                                                color = color, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                                                        Row(modifier = Modifier.fillMaxWidth(),
+                                                                            horizontalArrangement = Arrangement.SpaceBetween) {
+                                                                            Text("Q${q.questionNumber}", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 14.sp)
+                                                                            Text(diffLabel, color = color, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                                                         }
                                                                         Spacer(modifier = Modifier.height(4.dp))
-                                                                        Text(q.topic,
-                                                                            color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                                                        Text(q.topic, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                                                                         Spacer(modifier = Modifier.height(4.dp))
                                                                         Text(
-                                                                            "$correctPart · $failCount failed" +
+                                                                            "$correctPart | $failCount failed" +
                                                                             if (topicCounts[q.topic] != null && topicCounts[q.topic]!! > 1)
-                                                                                " · topic repeated ${topicCounts[q.topic]}× on this paper"
+                                                                                " | topic repeated ${topicCounts[q.topic]}x on this paper"
                                                                             else "",
-                                                                            color = Color(0xFF94a3b8),
-                                                                            fontSize = 11.sp
+                                                                            color = Color(0xFF94a3b8), fontSize = 11.sp
                                                                         )
-
                                                                         if (expanded) {
                                                                             Spacer(modifier = Modifier.height(10.dp))
                                                                             Divider(color = Color(0xFF1e293b), thickness = 1.dp)
                                                                             Spacer(modifier = Modifier.height(10.dp))
-
-                                                                            Text("Strand ? Sub-strand",
-                                                                                color = Color(0xFF60a5fa), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                                            Text("Strand -> Sub-strand", color = Color(0xFF60a5fa), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                                                             Text(q.topic, color = Color.White, fontSize = 12.sp)
-
                                                                             Spacer(modifier = Modifier.height(8.dp))
-
                                                                             Text("Failed by $failCount student${if (failCount == 1) "" else "s"}",
                                                                                 color = Color(0xFFef4444), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-
                                                                             if (failedStudents.isEmpty()) {
-                                                                                Text("No one failed this question. Nice.",
-                                                                                    color = Color(0xFF10b981), fontSize = 12.sp)
+                                                                                Text("No one failed this question. Nice.", color = Color(0xFF10b981), fontSize = 12.sp)
                                                                             } else {
-                                                                                failedStudents.forEach { name ->
-                                                                                    Text("  • $name", color = Color.White, fontSize = 12.sp)
-                                                                                }
+                                                                                failedStudents.forEach { name -> Text("  - $name", color = Color.White, fontSize = 12.sp) }
                                                                             }
-
                                                                             Spacer(modifier = Modifier.height(8.dp))
-
-                                                                            Text("Topic repeated ${topicCounts[q.topic] ?: 1}× on this paper",
+                                                                            Text("Topic repeated ${topicCounts[q.topic] ?: 1}x on this paper",
                                                                                 color = Color(0xFF94a3b8), fontSize = 11.sp)
                                                                         }
                                                                     }
@@ -2498,7 +3039,6 @@ fun WaveUnitsApp() {
                                                     }
                                                 }
                                             }
-
                                             item {
                                                 Text("Leaderboard", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                                 Spacer(modifier = Modifier.height(8.dp))
