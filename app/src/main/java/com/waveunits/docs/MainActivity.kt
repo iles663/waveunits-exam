@@ -807,8 +807,11 @@ fun WaveUnitsApp() {
     var showAddSubjectDialog by remember { mutableStateOf(false) }
     var showNewExamDialog by remember { mutableStateOf(false) }
 
-    // Confirmation dialog state for deleting a grade with exams
     var pendingGradeDelete by remember { mutableStateOf<String?>(null) }
+    var pendingExamDelete by remember { mutableStateOf<ExamProject?>(null) }
+
+    // Three-state render: loading / empty / populated
+    var initialLoadComplete by remember { mutableStateOf(false) }
 
     var scanPhase by remember { mutableStateOf("") }
     var progressText by remember { mutableStateOf("") }
@@ -829,6 +832,10 @@ fun WaveUnitsApp() {
     var rosterIndex by remember { mutableStateOf(0) }
     var isRosterMode by remember { mutableStateOf(false) }
     var savedRosters by remember { mutableStateOf<List<RosterTemplate>>(emptyList()) }
+
+    // Roster editing state
+    var editingRosterId by remember { mutableStateOf<String?>(null) }
+    var editingRosterName by remember { mutableStateOf("") }
 
     var manualStudentName by remember { mutableStateOf("") }
     var printableReportText by remember { mutableStateOf("") }
@@ -893,16 +900,16 @@ fun WaveUnitsApp() {
         examAnalytics = null
         seriesAnalytics = null
         allResults = emptyList()
+        initialLoadComplete = false
         currentView = "home"
     }
 
-    // ===== SEQUENCED LOAD — tree first, then projects =====
-    // Both run in a single coroutine, awaited in order, so the fallback
-    // in the home screen never sees an empty tree alongside a populated
-    // project list. This fixes the "flash" of a different tree.
+    // Sequenced load: tree first, then projects, then set initialLoadComplete.
+    // The home screen will not render until this flips to true.
     fun loadTreeAndProjects() {
         scope.launch {
             val uid = auth.currentUser?.uid ?: return@launch
+            initialLoadComplete = false
             // 1. Tree first
             try {
                 val doc = db.collection("teacherTree").document(uid).get().await()
@@ -947,31 +954,8 @@ fun WaveUnitsApp() {
             } catch (e: Exception) {
                 Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
-        }
-    }
-
-    fun loadTree() {
-        scope.launch {
-            try {
-                val uid = auth.currentUser?.uid ?: return@launch
-                val doc = db.collection("teacherTree").document(uid).get().await()
-                if (doc.exists()) {
-                    val grades = (doc.get("grades") as? List<*>)?.filterIsInstance<String>() ?: emptyList()
-                    val subjectsRaw = doc.get("subjectsByGrade") as? Map<String, Any> ?: emptyMap()
-                    val subjectsMap = mutableMapOf<String, List<String>>()
-                    for ((g, v) in subjectsRaw) {
-                        val list = (v as? List<*>)?.filterIsInstance<String>() ?: emptyList()
-                        subjectsMap[g] = list
-                    }
-                    treeGrades = grades
-                    treeSubjects = subjectsMap
-                } else {
-                    treeGrades = emptyList()
-                    treeSubjects = emptyMap()
-                }
-            } catch (e: Exception) {
-                Toast.makeText(context, "Tree load error: ${e.message}", Toast.LENGTH_SHORT).show()
-            }
+            // 3. Both in — now the UI is allowed to draw the real thing
+            initialLoadComplete = true
         }
     }
 
@@ -1055,8 +1039,7 @@ fun WaveUnitsApp() {
         saveTree(treeGrades, newSubjects)
     }
 
-    // Deletes all exams under a grade, then removes the grade from the tree.
-    // Prevents orphan exams from resurrecting the grade via the fallback.
+    // Cascading delete: markedSheets, aiResponses, exam doc, results, then tree.
     fun deleteGradeAndItsExams(grade: String) {
         scope.launch {
             try {
@@ -1064,24 +1047,57 @@ fun WaveUnitsApp() {
                 val examsToDelete = projects.filter { it.grade == grade }
                 for (exam in examsToDelete) {
                     try {
-                        // Delete marked sheets subcollection first
                         val ms = db.collection("exams").document(exam.id).collection("markedSheets").get().await()
                         for (d in ms.documents) d.reference.delete().await()
-                        // Delete aiResponses subcollection
                         val ar = db.collection("exams").document(exam.id).collection("aiResponses").get().await()
                         for (d in ar.documents) d.reference.delete().await()
-                        // Delete the exam doc
                         db.collection("exams").document(exam.id).delete().await()
-                        // Delete results for this exam
                         val rs = db.collection("results").whereEqualTo("examId", exam.id).get().await()
                         for (d in rs.documents) d.reference.delete().await()
                     } catch (_: Exception) {}
                 }
-                // Now remove the grade from the tree
                 deleteGradeFromTree(grade)
-                // And refresh in-memory state
                 loadProjects()
                 Toast.makeText(context, "Deleted $grade and ${examsToDelete.size} exam(s)", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(context, "Delete error: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    // Single-exam cascading delete.
+    fun deleteExamCascade(exam: ExamProject) {
+        scope.launch {
+            try {
+                // 1. Marked sheets
+                try {
+                    val ms = db.collection("exams").document(exam.id).collection("markedSheets").get().await()
+                    for (d in ms.documents) d.reference.delete().await()
+                } catch (_: Exception) {}
+                // 2. AI responses
+                try {
+                    val ar = db.collection("exams").document(exam.id).collection("aiResponses").get().await()
+                    for (d in ar.documents) d.reference.delete().await()
+                } catch (_: Exception) {}
+                // 3. Results for this exam
+                try {
+                    val rs = db.collection("results").whereEqualTo("examId", exam.id).get().await()
+                    for (d in rs.documents) d.reference.delete().await()
+                } catch (_: Exception) {}
+                // 4. Exam doc
+                db.collection("exams").document(exam.id).delete().await()
+                // 5. Reset UI state so nothing dangles
+                sectionState = SectionViewState()
+                currentProject = null
+                currentProjectId = ""
+                currentProjectTitle = ""
+                collectedStudentAnswerSheets = emptyList()
+                markedAnswerSheets = emptyList()
+                examAnalytics = null
+                allResults = emptyList()
+                loadProjects()
+                currentView = "subject"
+                Toast.makeText(context, "Exam deleted", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Toast.makeText(context, "Delete error: ${e.message}", Toast.LENGTH_LONG).show()
             }
@@ -1171,6 +1187,7 @@ fun WaveUnitsApp() {
         }
     }
 
+    // New template
     fun saveRosterTemplate(templateName: String, names: List<String>) {
         if (templateName.isBlank() || names.isEmpty()) {
             Toast.makeText(context, "Enter name and names", Toast.LENGTH_SHORT).show(); return
@@ -1180,12 +1197,33 @@ fun WaveUnitsApp() {
                 db.collection("rosterTemplates").add(mapOf(
                     "teacherId" to auth.currentUser?.uid,
                     "name" to templateName, "names" to names,
-                    "createdAt" to System.currentTimeMillis()
+                    "createdAt" to System.currentTimeMillis(),
+                    "updatedAt" to System.currentTimeMillis()
                 ))
                 Toast.makeText(context, "Saved '$templateName'", Toast.LENGTH_SHORT).show()
                 loadSavedRosters()
             } catch (e: Exception) {
                 Toast.makeText(context, "${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // Update existing template — this is the new edit path
+    fun updateRosterTemplate(templateId: String, newName: String, newNames: List<String>) {
+        if (newName.isBlank() || newNames.isEmpty()) {
+            Toast.makeText(context, "Enter name and names", Toast.LENGTH_SHORT).show(); return
+        }
+        scope.launch {
+            try {
+                db.collection("rosterTemplates").document(templateId).update(mapOf(
+                    "name" to newName,
+                    "names" to newNames,
+                    "updatedAt" to System.currentTimeMillis()
+                )).await()
+                Toast.makeText(context, "Updated '$newName'", Toast.LENGTH_SHORT).show()
+                loadSavedRosters()
+            } catch (e: Exception) {
+                Toast.makeText(context, "Update error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -1305,9 +1343,6 @@ fun WaveUnitsApp() {
         }
     }
 
-    // ===== SERIES ANALYTICS — batched results query =====
-    // One Firestore round-trip for all results in the series, instead of
-    // one per exam. Firestore whereIn caps at 30 values, so we chunk.
     fun loadSeriesAnalytics(grade: String, subjectKey: String) {
         scope.launch {
             try {
@@ -1323,7 +1358,6 @@ fun WaveUnitsApp() {
                 val examIds = seriesExams.map { it.id }
                 val perExamResults = mutableMapOf<String, MutableList<StudentResult>>()
 
-                // Chunk examIds into groups of 30 (Firestore whereIn limit)
                 val chunks = examIds.chunked(30)
                 for (chunk in chunks) {
                     val q = db.collection("results").whereIn("examId", chunk).get().await()
@@ -1719,10 +1753,7 @@ fun WaveUnitsApp() {
 
     LaunchedEffect(isLoggedIn, auth.currentUser?.uid) {
         if (isLoggedIn) {
-            // Clear first, then load — prevents cross-account state leak
             clearAllState()
-            // Sequenced load: tree before projects, so the fallback in
-            // the home screen never sees an empty tree with a full project list
             loadTreeAndProjects()
             loadSavedRosters()
         }
@@ -1861,7 +1892,6 @@ fun WaveUnitsApp() {
         )
     }
 
-    // Confirmation dialog for deleting a grade that has exams
     val gradeToConfirm = pendingGradeDelete
     if (gradeToConfirm != null) {
         val examCount = projects.count { it.grade == gradeToConfirm }
@@ -1890,6 +1920,33 @@ fun WaveUnitsApp() {
             },
             dismissButton = {
                 TextButton(onClick = { pendingGradeDelete = null }) { Text("Cancel") }
+            }
+        )
+    }
+
+    val examToConfirm = pendingExamDelete
+    if (examToConfirm != null) {
+        AlertDialog(
+            onDismissRequest = { pendingExamDelete = null },
+            title = { Text("Delete exam?") },
+            text = {
+                Text(
+                    "\"${examToConfirm.title}\" and all its marked sheets and results will be permanently deleted. This cannot be undone.",
+                    color = Color.White
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val e = examToConfirm
+                        pendingExamDelete = null
+                        deleteExamCascade(e)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingExamDelete = null }) { Text("Cancel") }
             }
         )
     }
@@ -1974,138 +2031,158 @@ fun WaveUnitsApp() {
                 topBar = {
                     TopAppBar(
                         title = { Text("WaveUnits", fontWeight = FontWeight.Bold) },
-                        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1e293b)),
-                        actions = {
-                            IconButton(onClick = {
-                                scope.launch {
-                                    try { googleSignInClient.signOut().await() } catch (_: Exception) {}
-                                    auth.signOut()
-                                    isLoggedIn = false
-                                    saveLoginState(false)
-                                    clearAllState()
-                                }
-                            }) {
-                                Text(
-                                    "Log out",
-                                    fontSize = 13.sp,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    modifier = Modifier.padding(horizontal = 4.dp)
-                                )
-                            }
-                        }
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1e293b))
                     )
                 }
             ) { padding ->
                 Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
                     when (currentView) {
                         "home" -> {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("My Classes", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                                Button(
-                                    onClick = { showAddGradeDialog = true },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                ) { Text("+ Add Grade") }
-                            }
-                            Spacer(modifier = Modifier.height(16.dp))
-
-                            val effectiveGrades = if (treeGrades.isNotEmpty()) treeGrades
-                                                  else projects.map { it.grade }.filter { it.isNotBlank() }.distinct().sorted()
-
-                            if (effectiveGrades.isEmpty()) {
-                                Column(
+                            // Three-state render: loading / empty / populated
+                            if (!initialLoadComplete) {
+                                Box(
                                     modifier = Modifier.fillMaxSize(),
-                                    verticalArrangement = Arrangement.Center,
-                                    horizontalAlignment = Alignment.CenterHorizontally
+                                    contentAlignment = Alignment.Center
                                 ) {
-                                    Text("??", fontSize = 48.sp)
-                                    Spacer(modifier = Modifier.height(16.dp))
-                                    Text("Welcome to WaveUnits", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Text("Add the grades and subjects you teach.",
-                                        color = Color(0xFF94a3b8), fontSize = 14.sp)
-                                    Spacer(modifier = Modifier.height(32.dp))
-                                    Button(
-                                        onClick = { showAddGradeDialog = true },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981)),
-                                        modifier = Modifier.fillMaxWidth(0.7f)
-                                    ) { Text("+ Add Subjects I Teach") }
-                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        CircularProgressIndicator(color = Color(0xFF60a5fa))
+                                        Spacer(modifier = Modifier.height(16.dp))
+                                        Text("Loading your classes...", color = Color(0xFF94a3b8), fontSize = 14.sp)
+                                    }
+                                }
+                            } else {
+                                // Header row: My Classes + Reload + Add Grade + Log out
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("My Classes", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                    Spacer(modifier = Modifier.weight(1f))
                                     Button(
                                         onClick = {
                                             loadTreeAndProjects()
-                                            Toast.makeText(context, "Refreshing...", Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(context, "Reloading...", Toast.LENGTH_SHORT).show()
                                         },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa)),
-                                        modifier = Modifier.fillMaxWidth(0.7f)
-                                    ) { Text("Refresh My Classes") }
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569)),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                    ) { Text("Reload", fontSize = 12.sp, maxLines = 1) }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Button(
+                                        onClick = { showAddGradeDialog = true },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981)),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                    ) { Text("+ Add Grade", fontSize = 12.sp, maxLines = 1) }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Button(
+                                        onClick = {
+                                            scope.launch {
+                                                try { googleSignInClient.signOut().await() } catch (_: Exception) {}
+                                                auth.signOut()
+                                                isLoggedIn = false
+                                                saveLoginState(false)
+                                                clearAllState()
+                                            }
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7f1d1d)),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                    ) { Text("Log out", fontSize = 12.sp, maxLines = 1) }
                                 }
-                            } else {
-                                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                    items(effectiveGrades) { grade ->
-                                        val treeSubs = treeSubjects[grade] ?: emptyList()
-                                        val examSubs = projects.filter { it.grade == grade }.map { it.subjectKey }.filter { it.isNotBlank() }.distinct()
-                                        val subjects = (treeSubs + examSubs).distinct().sorted()
+                                Spacer(modifier = Modifier.height(16.dp))
 
-                                        Card(
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))
-                                        ) {
-                                            Column(modifier = Modifier.padding(16.dp)) {
-                                                Row(
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    Text("?? $grade", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 17.sp)
-                                                    Row {
-                                                        Button(
-                                                            onClick = {
-                                                                selectedGrade = grade
-                                                                showAddSubjectDialog = true
-                                                            },
-                                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                        ) { Text("+ Subject", fontSize = 13.sp, maxLines = 1) }
-                                                        Spacer(modifier = Modifier.width(6.dp))
-                                                        Button(
-                                                            onClick = { pendingGradeDelete = grade },
-                                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
-                                                        ) { Text("Delete", fontSize = 12.sp, maxLines = 1) }
+                                val effectiveGrades = if (treeGrades.isNotEmpty()) treeGrades
+                                                      else projects.map { it.grade }.filter { it.isNotBlank() }.distinct().sorted()
+
+                                if (effectiveGrades.isEmpty()) {
+                                    Column(
+                                        modifier = Modifier.fillMaxSize(),
+                                        verticalArrangement = Arrangement.Center,
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        Text("??", fontSize = 48.sp)
+                                        Spacer(modifier = Modifier.height(16.dp))
+                                        Text("Welcome to WaveUnits", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text("Add the grades and subjects you teach.",
+                                            color = Color(0xFF94a3b8), fontSize = 14.sp)
+                                        Spacer(modifier = Modifier.height(32.dp))
+                                        Button(
+                                            onClick = { showAddGradeDialog = true },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981)),
+                                            modifier = Modifier.fillMaxWidth(0.7f)
+                                        ) { Text("+ Add Subjects I Teach") }
+                                        Spacer(modifier = Modifier.height(12.dp))
+                                        Button(
+                                            onClick = {
+                                                loadTreeAndProjects()
+                                                Toast.makeText(context, "Loading...", Toast.LENGTH_SHORT).show()
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa)),
+                                            modifier = Modifier.fillMaxWidth(0.7f)
+                                        ) { Text("Load My Classes") }
+                                    }
+                                } else {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        items(effectiveGrades) { grade ->
+                                            val treeSubs = treeSubjects[grade] ?: emptyList()
+                                            val examSubs = projects.filter { it.grade == grade }.map { it.subjectKey }.filter { it.isNotBlank() }.distinct()
+                                            val subjects = (treeSubs + examSubs).distinct().sorted()
+
+                                            Card(
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))
+                                            ) {
+                                                Column(modifier = Modifier.padding(16.dp)) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        Text("?? $grade", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 17.sp)
+                                                        Row {
+                                                            Button(
+                                                                onClick = {
+                                                                    selectedGrade = grade
+                                                                    showAddSubjectDialog = true
+                                                                },
+                                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                                            ) { Text("+ Subject", fontSize = 13.sp, maxLines = 1) }
+                                                            Spacer(modifier = Modifier.width(6.dp))
+                                                            Button(
+                                                                onClick = { pendingGradeDelete = grade },
+                                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
+                                                            ) { Text("Delete", fontSize = 12.sp, maxLines = 1) }
+                                                        }
                                                     }
-                                                }
-                                                Spacer(modifier = Modifier.height(10.dp))
-                                                if (subjects.isEmpty()) {
-                                                    Text("No subjects yet. Tap + Subject.",
-                                                        color = Color(0xFF64748b), fontSize = 12.sp)
-                                                } else {
-                                                    subjects.forEach { subject ->
-                                                        val count = projects.count { it.grade == grade && it.subjectKey == subject }
-                                                        Card(
-                                                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))
-                                                        ) {
-                                                            Row(
-                                                                modifier = Modifier.fillMaxWidth().padding(12.dp),
-                                                                verticalAlignment = Alignment.CenterVertically
+                                                    Spacer(modifier = Modifier.height(10.dp))
+                                                    if (subjects.isEmpty()) {
+                                                        Text("No subjects yet. Tap + Subject.",
+                                                            color = Color(0xFF64748b), fontSize = 12.sp)
+                                                    } else {
+                                                        subjects.forEach { subject ->
+                                                            val count = projects.count { it.grade == grade && it.subjectKey == subject }
+                                                            Card(
+                                                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))
                                                             ) {
-                                                                Column(
-                                                                    modifier = Modifier.weight(1f).clickable {
-                                                                        selectedGrade = grade
-                                                                        selectedSubject = subject
-                                                                        currentView = "subject"
-                                                                    }
+                                                                Row(
+                                                                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                                                    verticalAlignment = Alignment.CenterVertically
                                                                 ) {
-                                                                    Text("?? $subject", color = Color.White, fontSize = 14.sp)
-                                                                    Text("$count exams", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                                    Column(
+                                                                        modifier = Modifier.weight(1f).clickable {
+                                                                            selectedGrade = grade
+                                                                            selectedSubject = subject
+                                                                            currentView = "subject"
+                                                                        }
+                                                                    ) {
+                                                                        Text("?? $subject", color = Color.White, fontSize = 14.sp)
+                                                                        Text("$count exams", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                                    }
+                                                                    Button(
+                                                                        onClick = { deleteSubjectFromTree(grade, subject) },
+                                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7f1d1d))
+                                                                    ) { Text("Delete", fontSize = 11.sp, maxLines = 1) }
                                                                 }
-                                                                Button(
-                                                                    onClick = { deleteSubjectFromTree(grade, subject) },
-                                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7f1d1d))
-                                                                ) { Text("Delete", fontSize = 11.sp, maxLines = 1) }
                                                             }
                                                         }
                                                     }
@@ -2171,21 +2248,33 @@ fun WaveUnitsApp() {
                                 LazyColumn {
                                     items(exams) { exam ->
                                         Card(
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                                                .clickable {
-                                                    currentProject = exam
-                                                    currentProjectId = exam.id
-                                                    currentProjectTitle = exam.title
-                                                    currentView = "projectDetail"
-                                                    loadExamData(exam.id)
-                                                    loadAIResponses(exam.id)
-                                                },
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                             colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))
                                         ) {
-                                            Column(modifier = Modifier.padding(16.dp)) {
-                                                Text(exam.title, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                Text("Created: ${exam.createdAt}", color = Color(0xFF64748b), fontSize = 12.sp)
-                                                Text("Status: ${exam.status}", color = Color(0xFF64748b), fontSize = 12.sp)
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Column(
+                                                    modifier = Modifier.weight(1f).clickable {
+                                                        currentProject = exam
+                                                        currentProjectId = exam.id
+                                                        currentProjectTitle = exam.title
+                                                        currentView = "projectDetail"
+                                                        loadExamData(exam.id)
+                                                        loadAIResponses(exam.id)
+                                                    }
+                                                ) {
+                                                    Text(exam.title, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                    Text("Created: ${exam.createdAt}", color = Color(0xFF64748b), fontSize = 12.sp)
+                                                    Text("Status: ${exam.status}", color = Color(0xFF64748b), fontSize = 12.sp)
+                                                }
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Button(
+                                                    onClick = { pendingExamDelete = exam },
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444)),
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                                ) { Text("Delete", fontSize = 11.sp, maxLines = 1) }
                                             }
                                         }
                                     }
@@ -2492,15 +2581,7 @@ fun WaveUnitsApp() {
                                         }
                                         item {
                                             Button(
-                                                onClick = {
-                                                    scope.launch {
-                                                        try {
-                                                            db.collection("exams").document(currentProjectId).delete().await()
-                                                            loadProjects()
-                                                            currentView = "subject"
-                                                        } catch (e: Exception) {}
-                                                    }
-                                                },
+                                                onClick = { pendingExamDelete = p },
                                                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
                                             ) { Text("Delete Exam") }
@@ -2549,12 +2630,19 @@ fun WaveUnitsApp() {
                                 if (sectionState.isRosterSetupOpen) {
                                     LazyColumn(modifier = Modifier.fillMaxSize()) {
                                         item {
-                                            Button(onClick = { sectionState = sectionState.copy(isRosterSetupOpen = false) },
+                                            Button(onClick = {
+                                                sectionState = sectionState.copy(isRosterSetupOpen = false)
+                                                editingRosterId = null
+                                                editingRosterName = ""
+                                            },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
                                             ) { Text("? Back") }
                                             Spacer(modifier = Modifier.height(8.dp))
-                                            Text("Class Roster", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                            Text(
+                                                if (editingRosterId != null) "Edit Roster" else "Class Roster",
+                                                fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa)
+                                            )
                                             Spacer(modifier = Modifier.height(8.dp))
                                             OutlinedTextField(value = rosterInput, onValueChange = { rosterInput = it },
                                                 label = { Text("Names separated by commas") },
@@ -2563,25 +2651,50 @@ fun WaveUnitsApp() {
                                             OutlinedTextField(value = rosterTemplateName, onValueChange = { rosterTemplateName = it },
                                                 label = { Text("Template Name") }, modifier = Modifier.fillMaxWidth())
                                             Spacer(modifier = Modifier.height(8.dp))
-                                            Button(
-                                                onClick = {
-                                                    rosterNames = rosterInput.split(",").map { it.trim() }.filter { it.isNotBlank() }
-                                                    rosterIndex = 0; isRosterMode = true
-                                                    Toast.makeText(context, "Loaded ${rosterNames.size}", Toast.LENGTH_SHORT).show()
-                                                    sectionState = sectionState.copy(isRosterSetupOpen = false)
-                                                },
-                                                modifier = Modifier.fillMaxWidth(),
-                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                            ) { Text("Use This Roster") }
-                                            Spacer(modifier = Modifier.height(8.dp))
-                                            Button(
-                                                onClick = {
-                                                    rosterNames = rosterInput.split(",").map { it.trim() }.filter { it.isNotBlank() }
-                                                    saveRosterTemplate(rosterTemplateName, rosterNames)
-                                                },
-                                                modifier = Modifier.fillMaxWidth(),
-                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                            ) { Text("Save as Template") }
+                                            if (editingRosterId != null) {
+                                                // EDIT MODE
+                                                Button(
+                                                    onClick = {
+                                                        rosterNames = rosterInput.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                                                        updateRosterTemplate(editingRosterId!!, rosterTemplateName, rosterNames)
+                                                        editingRosterId = null
+                                                        editingRosterName = ""
+                                                        sectionState = sectionState.copy(isRosterSetupOpen = false)
+                                                    },
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                                ) { Text("Save Changes") }
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Button(
+                                                    onClick = {
+                                                        rosterNames = rosterInput.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                                                        saveRosterTemplate(rosterTemplateName + " (copy)", rosterNames)
+                                                    },
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                                                ) { Text("Save as New Copy") }
+                                            } else {
+                                                // CREATE MODE
+                                                Button(
+                                                    onClick = {
+                                                        rosterNames = rosterInput.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                                                        rosterIndex = 0; isRosterMode = true
+                                                        Toast.makeText(context, "Loaded ${rosterNames.size}", Toast.LENGTH_SHORT).show()
+                                                        sectionState = sectionState.copy(isRosterSetupOpen = false)
+                                                    },
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                                ) { Text("Use This Roster") }
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Button(
+                                                    onClick = {
+                                                        rosterNames = rosterInput.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                                                        saveRosterTemplate(rosterTemplateName, rosterNames)
+                                                    },
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                                                ) { Text("Save as Template") }
+                                            }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             if (rosterNames.isNotEmpty()) {
                                                 Text("Current Roster (${rosterNames.size}):", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
@@ -2608,25 +2721,40 @@ fun WaveUnitsApp() {
                                                     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                         colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                         Column(modifier = Modifier.padding(16.dp)) {
-                                                            Row(modifier = Modifier.fillMaxWidth(),
-                                                                horizontalArrangement = Arrangement.SpaceBetween) {
-                                                                Text(r.name, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                                Row {
-                                                                    Button(
-                                                                        onClick = {
-                                                                            rosterNames = r.names
-                                                                            rosterIndex = 0; isRosterMode = true
-                                                                            sectionState = sectionState.copy(isSavedRostersOpen = false)
-                                                                        },
-                                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                                    ) { Text("Use") }
-                                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                                    Button(onClick = { deleteRosterTemplate(r.id) },
-                                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
-                                                                    ) { Text("X") }
-                                                                }
-                                                            }
+                                                            Text(r.name, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                                                             Text("${r.names.size} students", color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                                            Spacer(modifier = Modifier.height(8.dp))
+                                                            Row {
+                                                                Button(
+                                                                    onClick = {
+                                                                        rosterNames = r.names
+                                                                        rosterIndex = 0; isRosterMode = true
+                                                                        sectionState = sectionState.copy(isSavedRostersOpen = false)
+                                                                        Toast.makeText(context, "Using '${r.name}'", Toast.LENGTH_SHORT).show()
+                                                                    },
+                                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                                                ) { Text("Use", fontSize = 12.sp) }
+                                                                Spacer(modifier = Modifier.width(6.dp))
+                                                                Button(
+                                                                    onClick = {
+                                                                        // Open in edit mode
+                                                                        editingRosterId = r.id
+                                                                        editingRosterName = r.name
+                                                                        rosterTemplateName = r.name
+                                                                        rosterInput = r.names.joinToString(", ")
+                                                                        rosterNames = r.names
+                                                                        sectionState = sectionState.copy(
+                                                                            isSavedRostersOpen = false,
+                                                                            isRosterSetupOpen = true
+                                                                        )
+                                                                    },
+                                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                                                                ) { Text("Edit", fontSize = 12.sp) }
+                                                                Spacer(modifier = Modifier.width(6.dp))
+                                                                Button(onClick = { deleteRosterTemplate(r.id) },
+                                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7f1d1d))
+                                                                ) { Text("Delete", fontSize = 12.sp) }
+                                                            }
                                                         }
                                                     }
                                                 }
