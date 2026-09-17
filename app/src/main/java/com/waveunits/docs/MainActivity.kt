@@ -15,6 +15,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -148,6 +149,30 @@ data class TopicSeriesPoint(val topic: String, val scores: List<Pair<Long, Doubl
 data class StudentSeriesPoint(val studentName: String, val scores: List<Pair<Long, Double>>, val change: Double, val trend: String)
 data class ClusterPoint(val topic: String, val students: List<String>, val examCount: Int)
 
+// New: per-student portfolio within a class path
+data class TopicStat(
+    val topic: String,
+    val passedCount: Int,
+    val failedCount: Int,
+    val examsAppeared: Int,
+    val averageScore: Double
+)
+
+data class ClassPathStudentPortfolio(
+    val studentName: String,
+    val combinedAverage: Double,
+    val overallGrade: String,
+    val rank: Int,
+    val examsTaken: Int,
+    val highestExam: Pair<String, Double>,
+    val lowestExam: Pair<String, Double>,
+    val trend: String,
+    val trendChange: Double,
+    val mostFailedTopics: List<TopicStat>,
+    val mostPassedTopics: List<TopicStat>,
+    val examScores: List<Pair<String, Double>>
+)
+
 data class SeriesAnalyticsBundle(
     val grade: String,
     val subjectKey: String,
@@ -157,7 +182,8 @@ data class SeriesAnalyticsBundle(
     val topicSeries: List<TopicSeriesPoint>,
     val studentSeries: List<StudentSeriesPoint>,
     val clusters: List<ClusterPoint>,
-    val examCount: Int
+    val examCount: Int,
+    val studentPortfolios: List<ClassPathStudentPortfolio>
 )
 
 data class MarkedAnswerSheetData(
@@ -429,7 +455,7 @@ private suspend fun gradeWithAI(
             MATCHING: Compare each student answer to the correct answer from
             the ANSWER KEY below, matched by question number.
 
-            ============ PART 1 — HUMAN-READABLE SHEET ============
+            ============ PART 1 - HUMAN-READABLE SHEET ============
             Write one line per graded question:
 
             Q1: Student chose A, correct answer is B -> WRONG
@@ -440,7 +466,7 @@ private suspend fun gradeWithAI(
             PERCENTAGE: <number>%
             GRADE: <letter>
 
-            ============ PART 2 — MACHINE-READABLE BLOCK ============
+            ============ PART 2 - MACHINE-READABLE BLOCK ============
             After the score, print this line on its own:
 
             ---ANALYTICS---
@@ -810,7 +836,6 @@ fun WaveUnitsApp() {
     var pendingGradeDelete by remember { mutableStateOf<String?>(null) }
     var pendingExamDelete by remember { mutableStateOf<ExamProject?>(null) }
 
-    // Three-state render: loading / empty / populated
     var initialLoadComplete by remember { mutableStateOf(false) }
 
     var scanPhase by remember { mutableStateOf("") }
@@ -833,9 +858,7 @@ fun WaveUnitsApp() {
     var isRosterMode by remember { mutableStateOf(false) }
     var savedRosters by remember { mutableStateOf<List<RosterTemplate>>(emptyList()) }
 
-    // Roster editing state
     var editingRosterId by remember { mutableStateOf<String?>(null) }
-    var editingRosterName by remember { mutableStateOf("") }
 
     var manualStudentName by remember { mutableStateOf("") }
     var printableReportText by remember { mutableStateOf("") }
@@ -854,6 +877,9 @@ fun WaveUnitsApp() {
     var seriesAnalytics by remember { mutableStateOf<SeriesAnalyticsBundle?>(null) }
     var selectedStudent by remember { mutableStateOf<StudentPerformance?>(null) }
     var allResults by remember { mutableStateOf<List<StudentResult>>(emptyList()) }
+
+    // Selected student portfolio within a class path
+    var selectedPortfolioStudent by remember { mutableStateOf<ClassPathStudentPortfolio?>(null) }
 
     fun saveLoginState(isLogged: Boolean) {
         prefs.edit().putBoolean("isLoggedIn", isLogged)
@@ -899,18 +925,16 @@ fun WaveUnitsApp() {
         markedAnswerSheets = emptyList()
         examAnalytics = null
         seriesAnalytics = null
+        selectedPortfolioStudent = null
         allResults = emptyList()
         initialLoadComplete = false
         currentView = "home"
     }
 
-    // Sequenced load: tree first, then projects, then set initialLoadComplete.
-    // The home screen will not render until this flips to true.
     fun loadTreeAndProjects() {
         scope.launch {
             val uid = auth.currentUser?.uid ?: return@launch
             initialLoadComplete = false
-            // 1. Tree first
             try {
                 val doc = db.collection("teacherTree").document(uid).get().await()
                 if (doc.exists()) {
@@ -930,7 +954,6 @@ fun WaveUnitsApp() {
             } catch (e: Exception) {
                 Toast.makeText(context, "Tree load error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
-            // 2. Then projects — tree is already in place
             try {
                 val result = db.collection("exams").whereEqualTo("teacherId", uid).get().await()
                 projects = result.documents.map { doc ->
@@ -954,7 +977,6 @@ fun WaveUnitsApp() {
             } catch (e: Exception) {
                 Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
-            // 3. Both in — now the UI is allowed to draw the real thing
             initialLoadComplete = true
         }
     }
@@ -1039,11 +1061,9 @@ fun WaveUnitsApp() {
         saveTree(treeGrades, newSubjects)
     }
 
-    // Cascading delete: markedSheets, aiResponses, exam doc, results, then tree.
     fun deleteGradeAndItsExams(grade: String) {
         scope.launch {
             try {
-                val uid = auth.currentUser?.uid ?: return@launch
                 val examsToDelete = projects.filter { it.grade == grade }
                 for (exam in examsToDelete) {
                     try {
@@ -1065,28 +1085,22 @@ fun WaveUnitsApp() {
         }
     }
 
-    // Single-exam cascading delete.
     fun deleteExamCascade(exam: ExamProject) {
         scope.launch {
             try {
-                // 1. Marked sheets
                 try {
                     val ms = db.collection("exams").document(exam.id).collection("markedSheets").get().await()
                     for (d in ms.documents) d.reference.delete().await()
                 } catch (_: Exception) {}
-                // 2. AI responses
                 try {
                     val ar = db.collection("exams").document(exam.id).collection("aiResponses").get().await()
                     for (d in ar.documents) d.reference.delete().await()
                 } catch (_: Exception) {}
-                // 3. Results for this exam
                 try {
                     val rs = db.collection("results").whereEqualTo("examId", exam.id).get().await()
                     for (d in rs.documents) d.reference.delete().await()
                 } catch (_: Exception) {}
-                // 4. Exam doc
                 db.collection("exams").document(exam.id).delete().await()
-                // 5. Reset UI state so nothing dangles
                 sectionState = SectionViewState()
                 currentProject = null
                 currentProjectId = ""
@@ -1187,7 +1201,6 @@ fun WaveUnitsApp() {
         }
     }
 
-    // New template
     fun saveRosterTemplate(templateName: String, names: List<String>) {
         if (templateName.isBlank() || names.isEmpty()) {
             Toast.makeText(context, "Enter name and names", Toast.LENGTH_SHORT).show(); return
@@ -1208,7 +1221,6 @@ fun WaveUnitsApp() {
         }
     }
 
-    // Update existing template — this is the new edit path
     fun updateRosterTemplate(templateId: String, newName: String, newNames: List<String>) {
         if (newName.isBlank() || newNames.isEmpty()) {
             Toast.makeText(context, "Enter name and names", Toast.LENGTH_SHORT).show(); return
@@ -1348,10 +1360,13 @@ fun WaveUnitsApp() {
             try {
                 val seriesExams = projects
                     .filter { it.grade == grade && it.subjectKey == subjectKey }
-                    .sortedByDescending { it.createdAtMillis }
+                    .sortedBy { it.createdAtMillis } // oldest first for trend
 
                 if (seriesExams.isEmpty()) {
-                    seriesAnalytics = SeriesAnalyticsBundle(grade, subjectKey, emptyList(), 0.0, 0.0, emptyList(), emptyList(), emptyList(), 0)
+                    seriesAnalytics = SeriesAnalyticsBundle(
+                        grade, subjectKey, emptyList(), 0.0, 0.0,
+                        emptyList(), emptyList(), emptyList(), 0, emptyList()
+                    )
                     return@launch
                 }
 
@@ -1391,7 +1406,7 @@ fun WaveUnitsApp() {
                 }
 
                 val classAverage = if (examPoints.isNotEmpty()) examPoints.map { it.classAverage }.average() else 0.0
-                val classTrend = if (examPoints.size >= 2) examPoints.first().classAverage - examPoints.last().classAverage else 0.0
+                val classTrend = if (examPoints.size >= 2) examPoints.last().classAverage - examPoints.first().classAverage else 0.0
 
                 val topicSeriesMap = mutableMapOf<String, MutableList<Pair<Long, Double>>>()
                 for (exam in seriesExams) {
@@ -1456,9 +1471,129 @@ fun WaveUnitsApp() {
                     }
                 }
 
+                // ===== Build per-student portfolios for the class path =====
+                // Aggregate every student across every exam in the path
+                val allStudentNames = mutableSetOf<String>()
+                for (exam in seriesExams) {
+                    perExamResults[exam.id]?.forEach { r ->
+                        if (r.studentName.isNotBlank() && r.studentName != "Unknown") {
+                            allStudentNames.add(r.studentName)
+                        }
+                    }
+                }
+
+                val rawPortfolios = mutableListOf<ClassPathStudentPortfolio>()
+                for (studentName in allStudentNames) {
+                    // Their per-exam scores across the path (ordered oldest -> newest)
+                    val examScores = mutableListOf<Pair<String, Double>>()
+                    val percentages = mutableListOf<Double>()
+                    // topic -> list of scores (per exam) where topic appeared
+                    val topicScoresByExam = mutableMapOf<String, MutableList<Double>>()
+                    // topic -> count of passed / failed / exams appeared
+                    val topicPassed = mutableMapOf<String, Int>()
+                    val topicFailed = mutableMapOf<String, Int>()
+                    val topicAppeared = mutableMapOf<String, Int>()
+
+                    for (exam in seriesExams) {
+                        val results = perExamResults[exam.id] ?: continue
+                        val r = results.find { it.studentName == studentName } ?: continue
+                        examScores.add(Pair(exam.title, r.percentage))
+                        percentages.add(r.percentage)
+
+                        // Group this student's questions by topic for this exam
+                        val perTopicForExam = mutableMapOf<String, MutableList<Boolean>>()
+                        for (q in r.questions) {
+                            if (q.questionNumber <= 0) continue
+                            if (q.topic.isBlank()) continue
+                            perTopicForExam.getOrPut(q.topic) { mutableListOf() }.add(q.isCorrect)
+                        }
+                        for ((topic, correctList) in perTopicForExam) {
+                            val total = correctList.size
+                            val correct = correctList.count { it }
+                            val pctOnTopic = if (total > 0) correct * 100.0 / total else 0.0
+                            topicScoresByExam.getOrPut(topic) { mutableListOf() }.add(pctOnTopic)
+                            topicPassed[topic] = (topicPassed[topic] ?: 0) + correct
+                            topicFailed[topic] = (topicFailed[topic] ?: 0) + (total - correct)
+                            topicAppeared[topic] = (topicAppeared[topic] ?: 0) + 1
+                        }
+                    }
+
+                    if (percentages.isEmpty()) continue
+
+                    val combinedAverage = percentages.average()
+                    val overallGrade = getKenyanGrade(combinedAverage)
+                    val examsTaken = percentages.size
+
+                    val highestExam = examScores.maxByOrNull { it.second } ?: Pair("", 0.0)
+                    val lowestExam = examScores.minByOrNull { it.second } ?: Pair("", 0.0)
+
+                    val trendChange = if (percentages.size >= 2) {
+                        percentages.last() - percentages.first()
+                    } else 0.0
+                    val trend = when {
+                        percentages.size < 2 -> "insufficient data"
+                        trendChange > 5.0 -> "improving"
+                        trendChange < -5.0 -> "declining"
+                        else -> "steady"
+                    }
+
+                    // Build TopicStat list for this student
+                    val topicStats = topicScoresByExam.map { (topic, scores) ->
+                        TopicStat(
+                            topic = topic,
+                            passedCount = topicPassed[topic] ?: 0,
+                            failedCount = topicFailed[topic] ?: 0,
+                            examsAppeared = topicAppeared[topic] ?: 0,
+                            averageScore = if (scores.isNotEmpty()) scores.average() else 0.0
+                        )
+                    }
+
+                    // Most failed: highest failed count, then lowest average
+                    val mostFailed = topicStats
+                        .filter { it.failedCount > 0 }
+                        .sortedWith(compareByDescending<TopicStat> { it.failedCount }
+                            .thenBy { it.averageScore })
+                        .take(5)
+
+                    // Most passed: highest passed count, then highest average
+                    val mostPassed = topicStats
+                        .filter { it.passedCount > 0 }
+                        .sortedWith(compareByDescending<TopicStat> { it.passedCount }
+                            .thenByDescending { it.averageScore })
+                        .take(5)
+
+                    rawPortfolios.add(ClassPathStudentPortfolio(
+                        studentName = studentName,
+                        combinedAverage = combinedAverage,
+                        overallGrade = overallGrade,
+                        rank = 0, // assigned below
+                        examsTaken = examsTaken,
+                        highestExam = highestExam,
+                        lowestExam = lowestExam,
+                        trend = trend,
+                        trendChange = trendChange,
+                        mostFailedTopics = mostFailed,
+                        mostPassedTopics = mostPassed,
+                        examScores = examScores
+                    ))
+                }
+
+                // Rank by combined average descending
+                val rankedPortfolios = rawPortfolios
+                    .sortedByDescending { it.combinedAverage }
+                    .mapIndexed { i, p -> p.copy(rank = i + 1) }
+
                 seriesAnalytics = SeriesAnalyticsBundle(
-                    grade, subjectKey, examPoints, classAverage, classTrend,
-                    topicSeries, studentSeries, clusters, examPoints.size
+                    grade = grade,
+                    subjectKey = subjectKey,
+                    examPoints = examPoints,
+                    classAverage = classAverage,
+                    classTrend = classTrend,
+                    topicSeries = topicSeries,
+                    studentSeries = studentSeries,
+                    clusters = clusters,
+                    examCount = examPoints.size,
+                    studentPortfolios = rankedPortfolios
                 )
             } catch (e: Exception) {
                 Toast.makeText(context, "Series error: ${e.message}", Toast.LENGTH_SHORT).show()
@@ -1807,7 +1942,7 @@ fun WaveUnitsApp() {
             title = { Text("Add a Subject") },
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                    Text("$gradeForDialog", color = Color(0xFF60a5fa), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text(gradeForDialog, color = Color(0xFF60a5fa), fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(8.dp))
                     CBC_SUBJECTS.forEach { s ->
                         Card(
@@ -1846,7 +1981,7 @@ fun WaveUnitsApp() {
             title = { Text("Create First Exam") },
             text = {
                 Column {
-                    Text("${selectedGrade ?: ""}  •  ${selectedSubject ?: ""}",
+                    Text("${selectedGrade ?: ""}  -  ${selectedSubject ?: ""}",
                         color = Color(0xFF60a5fa), fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(
@@ -1977,7 +2112,7 @@ fun WaveUnitsApp() {
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDB4437))
                     ) { Text("Sign in with Google") }
                     Spacer(modifier = Modifier.height(16.dp))
-                    Text("— or —", color = Color(0xFF94a3b8), fontSize = 12.sp)
+                    Text("- or -", color = Color(0xFF94a3b8), fontSize = 12.sp)
                     Spacer(modifier = Modifier.height(16.dp))
                     OutlinedTextField(value = email, onValueChange = { email = it },
                         label = { Text("Email") }, modifier = Modifier.fillMaxWidth())
@@ -2038,7 +2173,6 @@ fun WaveUnitsApp() {
                 Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
                     when (currentView) {
                         "home" -> {
-                            // Three-state render: loading / empty / populated
                             if (!initialLoadComplete) {
                                 Box(
                                     modifier = Modifier.fillMaxSize(),
@@ -2051,7 +2185,6 @@ fun WaveUnitsApp() {
                                     }
                                 }
                             } else {
-                                // Header row: My Classes + Reload + Add Grade + Log out
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically
@@ -2064,16 +2197,21 @@ fun WaveUnitsApp() {
                                             Toast.makeText(context, "Reloading...", Toast.LENGTH_SHORT).show()
                                         },
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569)),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                                     ) { Text("Reload", fontSize = 12.sp, maxLines = 1) }
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Button(
                                         onClick = { showAddGradeDialog = true },
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981)),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                                    ) { Text("+ Add Grade", fontSize = 12.sp, maxLines = 1) }
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Button(
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                    ) { Text("+ Grade", fontSize = 12.sp, maxLines = 1) }
+                                }
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End
+                                ) {
+                                    OutlinedButton(
                                         onClick = {
                                             scope.launch {
                                                 try { googleSignInClient.signOut().await() } catch (_: Exception) {}
@@ -2083,9 +2221,12 @@ fun WaveUnitsApp() {
                                                 clearAllState()
                                             }
                                         },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7f1d1d)),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                                    ) { Text("Log out", fontSize = 12.sp, maxLines = 1) }
+                                        colors = ButtonDefaults.outlinedButtonColors(
+                                            contentColor = Color(0xFF94a3b8)
+                                        ),
+                                        border = BorderStroke(1.dp, Color(0xFF475569)),
+                                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)
+                                    ) { Text("Log out", fontSize = 13.sp, maxLines = 1) }
                                 }
                                 Spacer(modifier = Modifier.height(16.dp))
 
@@ -2098,8 +2239,6 @@ fun WaveUnitsApp() {
                                         verticalArrangement = Arrangement.Center,
                                         horizontalAlignment = Alignment.CenterHorizontally
                                     ) {
-                                        Text("??", fontSize = 48.sp)
-                                        Spacer(modifier = Modifier.height(16.dp))
                                         Text("Welcome to WaveUnits", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                         Spacer(modifier = Modifier.height(8.dp))
                                         Text("Add the grades and subjects you teach.",
@@ -2137,7 +2276,7 @@ fun WaveUnitsApp() {
                                                         horizontalArrangement = Arrangement.SpaceBetween,
                                                         verticalAlignment = Alignment.CenterVertically
                                                     ) {
-                                                        Text("?? $grade", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 17.sp)
+                                                        Text(grade, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 17.sp)
                                                         Row {
                                                             Button(
                                                                 onClick = {
@@ -2175,7 +2314,7 @@ fun WaveUnitsApp() {
                                                                             currentView = "subject"
                                                                         }
                                                                     ) {
-                                                                        Text("?? $subject", color = Color.White, fontSize = 14.sp)
+                                                                        Text(subject, color = Color.White, fontSize = 14.sp)
                                                                         Text("$count exams", color = Color(0xFF94a3b8), fontSize = 11.sp)
                                                                     }
                                                                     Button(
@@ -2204,7 +2343,7 @@ fun WaveUnitsApp() {
                                 Button(
                                     onClick = { currentView = "home" },
                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                ) { Text("? Back") }
+                                ) { Text("Back", maxLines = 1) }
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(grade, color = Color(0xFF94a3b8), fontSize = 11.sp)
@@ -2226,7 +2365,7 @@ fun WaveUnitsApp() {
                                 },
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                            ) { Text("?? Class Path Analytics") }
+                            ) { Text("Class Path Analytics") }
                             Spacer(modifier = Modifier.height(8.dp))
                             Button(
                                 onClick = {
@@ -2283,77 +2422,115 @@ fun WaveUnitsApp() {
                         }
                         "seriesAnalytics" -> {
                             val s = seriesAnalytics
-                            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                item {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Button(
-                                            onClick = { currentView = "subject" },
-                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                        ) { Text("? Back") }
-                                        Spacer(modifier = Modifier.width(12.dp))
-                                        Column {
-                                            Text("Class Path Analytics", color = Color(0xFF94a3b8), fontSize = 11.sp)
-                                            Text("${s?.grade ?: ""} • ${s?.subjectKey ?: ""}",
-                                                fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                            // Detail view for a selected student portfolio
+                            if (selectedPortfolioStudent != null) {
+                                val sp = selectedPortfolioStudent!!
+                                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                    item {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Button(
+                                                onClick = { selectedPortfolioStudent = null },
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                            ) { Text("Back", maxLines = 1) }
+                                            Spacer(modifier = Modifier.width(12.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text("Student Portfolio", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                Text(sp.studentName, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                            }
                                         }
+                                        Spacer(modifier = Modifier.height(16.dp))
                                     }
-                                    Spacer(modifier = Modifier.height(16.dp))
-                                }
 
-                                if (s == null || s.examCount == 0) {
-                                    item { Text("No exams in this class path yet.", color = Color(0xFF94a3b8)) }
-                                } else {
                                     item {
                                         Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                                             colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                             Column(modifier = Modifier.padding(16.dp)) {
-                                                Text("Class Average", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                Text("${"%.1f".format(s.classAverage)}%", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                                Text("Overview", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Text("Path: ${s?.grade ?: ""} - ${s?.subjectKey ?: ""}", color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                                Text("Combined Average: ${"%.1f".format(sp.combinedAverage)}%", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                                Text("Overall Grade: ${sp.overallGrade}", color = Color.White, fontSize = 14.sp)
+                                                Text("Rank in Class Path: #${sp.rank}", color = Color(0xFFf59e0b), fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                                Text("Exams Taken: ${sp.examsTaken}", color = Color.White, fontSize = 14.sp)
+                                            }
+                                        }
+                                    }
+
+                                    item {
+                                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
+                                            Column(modifier = Modifier.padding(16.dp)) {
+                                                Text("Highs and Lows", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Text("Highest: ${sp.highestExam.first} - ${"%.1f".format(sp.highestExam.second)}%",
+                                                    color = Color(0xFF10b981), fontSize = 13.sp)
+                                                Text("Lowest: ${sp.lowestExam.first} - ${"%.1f".format(sp.lowestExam.second)}%",
+                                                    color = Color(0xFFef4444), fontSize = 13.sp)
                                                 Text(
                                                     when {
-                                                        s.examCount < 2 -> "Need 2+ exams to show trend"
-                                                        s.classTrend > 3 -> "Improving (+${"%.1f".format(s.classTrend)})"
-                                                        s.classTrend < -3 -> "Declining (${"%.1f".format(s.classTrend)})"
-                                                        else -> "Steady"
+                                                        sp.trend == "improving" -> "Trend: improving (+${"%.1f".format(sp.trendChange)})"
+                                                        sp.trend == "declining" -> "Trend: declining (${"%.1f".format(sp.trendChange)})"
+                                                        sp.trend == "steady" -> "Trend: steady"
+                                                        else -> "Trend: insufficient data"
                                                     },
-                                                    color = when {
-                                                        s.classTrend > 3 -> Color(0xFF10b981)
-                                                        s.classTrend < -3 -> Color(0xFFef4444)
+                                                    color = when (sp.trend) {
+                                                        "improving" -> Color(0xFF10b981)
+                                                        "declining" -> Color(0xFFef4444)
                                                         else -> Color(0xFF94a3b8)
-                                                    }, fontSize = 13.sp
+                                                    },
+                                                    fontSize = 13.sp, fontWeight = FontWeight.Bold
                                                 )
                                             }
                                         }
                                     }
+
                                     item {
                                         Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                                             colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                             Column(modifier = Modifier.padding(16.dp)) {
-                                                Text("Timeline", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                Text("Score for Every Exam", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                Text("Oldest first", color = Color(0xFF64748b), fontSize = 11.sp)
                                                 Spacer(modifier = Modifier.height(8.dp))
-                                                s.examPoints.forEach { ep ->
-                                                    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
-                                                        .clickable {
-                                                            currentProjectId = ep.examId
-                                                            currentProjectTitle = ep.examTitle
-                                                            currentView = "projectDetail"
-                                                            loadExamData(ep.examId)
-                                                            loadAIResponses(ep.examId)
-                                                        },
-                                                        colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
-                                                        Row(modifier = Modifier.fillMaxWidth().padding(12.dp),
-                                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                                            verticalAlignment = Alignment.CenterVertically) {
-                                                            Column(modifier = Modifier.weight(1f)) {
-                                                                Text(ep.examTitle, color = Color.White, fontSize = 14.sp)
-                                                                Text(formatTimestamp(ep.timestamp), color = Color(0xFF64748b), fontSize = 11.sp)
+                                                sp.examScores.forEach { (title, pct) ->
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                        horizontalArrangement = Arrangement.SpaceBetween
+                                                    ) {
+                                                        Text(title, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                                                        Text("${"%.1f".format(pct)}%  (${getKenyanGrade(pct)})",
+                                                            color = if (pct >= 50) Color(0xFF10b981) else Color(0xFFef4444),
+                                                            fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    item {
+                                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
+                                            Column(modifier = Modifier.padding(16.dp)) {
+                                                Text("Most Failed Topics", fontWeight = FontWeight.Bold, color = Color(0xFFef4444), fontSize = 16.sp)
+                                                Text("Ranked by total failures across the class path",
+                                                    color = Color(0xFF64748b), fontSize = 11.sp)
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                if (sp.mostFailedTopics.isEmpty()) {
+                                                    Text("No failures recorded.", color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                                } else {
+                                                    sp.mostFailedTopics.forEach { t ->
+                                                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
+                                                            Column(modifier = Modifier.padding(12.dp)) {
+                                                                Text(t.topic, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                                                                Text("Failed ${t.failedCount} time(s) - passed ${t.passedCount} - appeared in ${t.examsAppeared} exam(s)",
+                                                                    color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                                Text("Average score on this topic: ${"%.1f".format(t.averageScore)}%",
+                                                                    color = if (t.averageScore >= 50) Color(0xFF10b981) else Color(0xFFef4444),
+                                                                    fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                                             }
-                                                            Text("${"%.1f".format(ep.classAverage)}%",
-                                                                color = if (ep.classAverage >= 50) Color(0xFF10b981) else Color(0xFFef4444),
-                                                                fontWeight = FontWeight.Bold)
                                                         }
                                                     }
                                                 }
@@ -2361,24 +2538,181 @@ fun WaveUnitsApp() {
                                         }
                                     }
 
-                                    val weakTopics = s.topicSeries.filter { it.isPersistentlyWeak }
-                                    if (weakTopics.isNotEmpty()) {
+                                    item {
+                                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
+                                            Column(modifier = Modifier.padding(16.dp)) {
+                                                Text("Most Passed Topics", fontWeight = FontWeight.Bold, color = Color(0xFF10b981), fontSize = 16.sp)
+                                                Text("Ranked by total correct answers across the class path",
+                                                    color = Color(0xFF64748b), fontSize = 11.sp)
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                if (sp.mostPassedTopics.isEmpty()) {
+                                                    Text("No passes recorded.", color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                                } else {
+                                                    sp.mostPassedTopics.forEach { t ->
+                                                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
+                                                            Column(modifier = Modifier.padding(12.dp)) {
+                                                                Text(t.topic, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                                                                Text("Passed ${t.passedCount} time(s) - failed ${t.failedCount} - appeared in ${t.examsAppeared} exam(s)",
+                                                                    color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                                Text("Average score on this topic: ${"%.1f".format(t.averageScore)}%",
+                                                                    color = if (t.averageScore >= 50) Color(0xFF10b981) else Color(0xFFef4444),
+                                                                    fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                    item {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Button(
+                                                onClick = { currentView = "subject" },
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                            ) { Text("Back", maxLines = 1) }
+                                            Spacer(modifier = Modifier.width(12.dp))
+                                            Column {
+                                                Text("Class Path Analytics", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                Text("${s?.grade ?: ""} - ${s?.subjectKey ?: ""}",
+                                                    fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.height(16.dp))
+                                    }
+
+                                    if (s == null || s.examCount == 0) {
+                                        item { Text("No exams in this class path yet.", color = Color(0xFF94a3b8)) }
+                                    } else {
                                         item {
                                             Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                                                 colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
                                                 Column(modifier = Modifier.padding(16.dp)) {
-                                                    Text("?? Persistent Weaknesses", fontWeight = FontWeight.Bold, color = Color(0xFFef4444))
-                                                    Text("Below 50% in every exam. Re-teach these.",
-                                                        color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                                    Text("Class Average", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                                    Text("${"%.1f".format(s.classAverage)}%", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                                    Text(
+                                                        when {
+                                                            s.examCount < 2 -> "Need 2+ exams to show trend"
+                                                            s.classTrend > 3 -> "Improving (+${"%.1f".format(s.classTrend)})"
+                                                            s.classTrend < -3 -> "Declining (${"%.1f".format(s.classTrend)})"
+                                                            else -> "Steady"
+                                                        },
+                                                        color = when {
+                                                            s.classTrend > 3 -> Color(0xFF10b981)
+                                                            s.classTrend < -3 -> Color(0xFFef4444)
+                                                            else -> Color(0xFF94a3b8)
+                                                        }, fontSize = 13.sp
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        item {
+                                            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
+                                                Column(modifier = Modifier.padding(16.dp)) {
+                                                    Text("Student Portfolios", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                    Text("Tap a student to see combined stats across every exam in this path.",
+                                                        color = Color(0xFF94a3b8), fontSize = 11.sp)
                                                     Spacer(modifier = Modifier.height(8.dp))
-                                                    weakTopics.forEach { t ->
-                                                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                                    s.studentPortfolios.forEach { sp ->
+                                                        Card(
+                                                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                                                                .clickable { selectedPortfolioStudent = sp },
+                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))
+                                                        ) {
+                                                            Row(
+                                                                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                                                verticalAlignment = Alignment.CenterVertically
+                                                            ) {
+                                                                Text("#${sp.rank}", color = Color(0xFFf59e0b), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                                                Spacer(modifier = Modifier.width(12.dp))
+                                                                Column(modifier = Modifier.weight(1f)) {
+                                                                    Text(sp.studentName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                                                    Text("${sp.examsTaken} exam(s) - Avg ${"%.1f".format(sp.combinedAverage)}% - ${sp.overallGrade}",
+                                                                        color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                                    Text(
+                                                                        when {
+                                                                            sp.trend == "improving" -> "Improving"
+                                                                            sp.trend == "declining" -> "Declining"
+                                                                            sp.trend == "steady" -> "Steady"
+                                                                            else -> "Insufficient data"
+                                                                        },
+                                                                        color = when (sp.trend) {
+                                                                            "improving" -> Color(0xFF10b981)
+                                                                            "declining" -> Color(0xFFef4444)
+                                                                            else -> Color(0xFF94a3b8)
+                                                                        },
+                                                                        fontSize = 11.sp
+                                                                    )
+                                                                }
+                                                                Text(">", color = Color(0xFF60a5fa), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        item {
+                                            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
+                                                Column(modifier = Modifier.padding(16.dp)) {
+                                                    Text("Timeline", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    s.examPoints.forEach { ep ->
+                                                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                                                            .clickable {
+                                                                currentProjectId = ep.examId
+                                                                currentProjectTitle = ep.examTitle
+                                                                currentView = "projectDetail"
+                                                                loadExamData(ep.examId)
+                                                                loadAIResponses(ep.examId)
+                                                            },
                                                             colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
-                                                            Column(modifier = Modifier.padding(12.dp)) {
-                                                                Text(t.topic, color = Color.White, fontWeight = FontWeight.Medium)
-                                                                t.scores.sortedByDescending { it.first }.forEach { p ->
-                                                                    Text("${formatTimestamp(p.first)}  ${"%.1f".format(p.second)}%",
-                                                                        color = Color(0xFFef4444), fontSize = 12.sp)
+                                                            Row(modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                                verticalAlignment = Alignment.CenterVertically) {
+                                                                Column(modifier = Modifier.weight(1f)) {
+                                                                    Text(ep.examTitle, color = Color.White, fontSize = 14.sp)
+                                                                    Text(formatTimestamp(ep.timestamp), color = Color(0xFF64748b), fontSize = 11.sp)
+                                                                }
+                                                                Text("${"%.1f".format(ep.classAverage)}%",
+                                                                    color = if (ep.classAverage >= 50) Color(0xFF10b981) else Color(0xFFef4444),
+                                                                    fontWeight = FontWeight.Bold)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        val weakTopics = s.topicSeries.filter { it.isPersistentlyWeak }
+                                        if (weakTopics.isNotEmpty()) {
+                                            item {
+                                                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
+                                                    Column(modifier = Modifier.padding(16.dp)) {
+                                                        Text("Persistent Weaknesses", fontWeight = FontWeight.Bold, color = Color(0xFFef4444), fontSize = 16.sp)
+                                                        Text("Below 50% in every exam. Re-teach these.",
+                                                            color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                                        Spacer(modifier = Modifier.height(8.dp))
+                                                        weakTopics.forEach { t ->
+                                                            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
+                                                                Column(modifier = Modifier.padding(12.dp)) {
+                                                                    Text(t.topic, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                                                                    t.scores.sortedByDescending { it.first }.forEach { p ->
+                                                                        Text("${formatTimestamp(p.first)}  ${"%.1f".format(p.second)}%",
+                                                                            color = Color(0xFFef4444), fontSize = 12.sp)
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -2386,64 +2720,64 @@ fun WaveUnitsApp() {
                                                 }
                                             }
                                         }
-                                    }
 
-                                    item {
-                                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
-                                            Column(modifier = Modifier.padding(16.dp)) {
-                                                Text("Student Progress", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                s.studentSeries.forEach { sp ->
-                                                    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-                                                        colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
-                                                        Column(modifier = Modifier.padding(12.dp)) {
-                                                            Row(modifier = Modifier.fillMaxWidth(),
-                                                                horizontalArrangement = Arrangement.SpaceBetween) {
-                                                                Text(sp.studentName, color = Color.White, fontWeight = FontWeight.Medium)
-                                                                Text(
-                                                                    when {
-                                                                        sp.trend == "improving" -> "? +${"%.1f".format(sp.change)}"
-                                                                        sp.trend == "declining" -> "? ${"%.1f".format(sp.change)}"
-                                                                        sp.trend == "steady" -> "— steady"
-                                                                        else -> "—"
-                                                                    },
-                                                                    color = when (sp.trend) {
-                                                                        "improving" -> Color(0xFF10b981)
-                                                                        "declining" -> Color(0xFFef4444)
-                                                                        else -> Color(0xFF94a3b8)
-                                                                    },
-                                                                    fontSize = 12.sp, fontWeight = FontWeight.Bold
-                                                                )
-                                                            }
-                                                            sp.scores.sortedByDescending { it.first }.forEach { p ->
-                                                                Text("${formatTimestamp(p.first)}  ${"%.1f".format(p.second)}%",
-                                                                    color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                        item {
+                                            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
+                                                Column(modifier = Modifier.padding(16.dp)) {
+                                                    Text("Student Progress", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    s.studentSeries.forEach { sp ->
+                                                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
+                                                            Column(modifier = Modifier.padding(12.dp)) {
+                                                                Row(modifier = Modifier.fillMaxWidth(),
+                                                                    horizontalArrangement = Arrangement.SpaceBetween) {
+                                                                    Text(sp.studentName, color = Color.White, fontWeight = FontWeight.Medium)
+                                                                    Text(
+                                                                        when {
+                                                                            sp.trend == "improving" -> "Up +${"%.1f".format(sp.change)}"
+                                                                            sp.trend == "declining" -> "Down ${"%.1f".format(sp.change)}"
+                                                                            sp.trend == "steady" -> "Steady"
+                                                                            else -> "-"
+                                                                        },
+                                                                        color = when (sp.trend) {
+                                                                            "improving" -> Color(0xFF10b981)
+                                                                            "declining" -> Color(0xFFef4444)
+                                                                            else -> Color(0xFF94a3b8)
+                                                                        },
+                                                                        fontSize = 12.sp, fontWeight = FontWeight.Bold
+                                                                    )
+                                                                }
+                                                                sp.scores.sortedByDescending { it.first }.forEach { p ->
+                                                                    Text("${formatTimestamp(p.first)}  ${"%.1f".format(p.second)}%",
+                                                                        color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                                }
                                                             }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
 
-                                    if (s.clusters.isNotEmpty()) {
-                                        item {
-                                            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
-                                                Column(modifier = Modifier.padding(16.dp)) {
-                                                    Text("?? Small-Group Focus", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                                    Text("These students fail the same topic in every exam.",
-                                                        color = Color(0xFF94a3b8), fontSize = 12.sp)
-                                                    Spacer(modifier = Modifier.height(8.dp))
-                                                    s.clusters.forEach { c ->
-                                                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
-                                                            Column(modifier = Modifier.padding(12.dp)) {
-                                                                Text(c.topic, color = Color.White, fontWeight = FontWeight.Medium)
-                                                                Text("Failed in all ${c.examCount} exams:",
-                                                                    color = Color(0xFF94a3b8), fontSize = 11.sp)
-                                                                c.students.forEach { n -> Text("  - $n", color = Color.White, fontSize = 12.sp) }
+                                        if (s.clusters.isNotEmpty()) {
+                                            item {
+                                                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
+                                                    Column(modifier = Modifier.padding(16.dp)) {
+                                                        Text("Small-Group Focus", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b), fontSize = 16.sp)
+                                                        Text("These students fail the same topic in every exam.",
+                                                            color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                                        Spacer(modifier = Modifier.height(8.dp))
+                                                        s.clusters.forEach { c ->
+                                                            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
+                                                                Column(modifier = Modifier.padding(12.dp)) {
+                                                                    Text(c.topic, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                                                                    Text("Failed in all ${c.examCount} exams:",
+                                                                        color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                                    c.students.forEach { n -> Text("  - $n", color = Color.White, fontSize = 12.sp) }
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -2477,10 +2811,10 @@ fun WaveUnitsApp() {
                                         Button(
                                             onClick = { currentView = "subject" },
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                        ) { Text("? Back") }
+                                        ) { Text("Back", maxLines = 1) }
                                         Spacer(modifier = Modifier.width(12.dp))
                                         Column(modifier = Modifier.weight(1f)) {
-                                            Text("${p?.grade ?: ""} • ${p?.subjectKey ?: ""}",
+                                            Text("${p?.grade ?: ""} - ${p?.subjectKey ?: ""}",
                                                 color = Color(0xFF94a3b8), fontSize = 11.sp)
                                             Text(currentProjectTitle, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                         }
@@ -2595,7 +2929,7 @@ fun WaveUnitsApp() {
                                             Button(onClick = { sectionState = sectionState.copy(isAnswerSheetGeneratorOpen = false) },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                            ) { Text("? Back") }
+                                            ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text("Generate Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                             Spacer(modifier = Modifier.height(8.dp))
@@ -2633,11 +2967,10 @@ fun WaveUnitsApp() {
                                             Button(onClick = {
                                                 sectionState = sectionState.copy(isRosterSetupOpen = false)
                                                 editingRosterId = null
-                                                editingRosterName = ""
                                             },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                            ) { Text("? Back") }
+                                            ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text(
                                                 if (editingRosterId != null) "Edit Roster" else "Class Roster",
@@ -2652,13 +2985,11 @@ fun WaveUnitsApp() {
                                                 label = { Text("Template Name") }, modifier = Modifier.fillMaxWidth())
                                             Spacer(modifier = Modifier.height(8.dp))
                                             if (editingRosterId != null) {
-                                                // EDIT MODE
                                                 Button(
                                                     onClick = {
                                                         rosterNames = rosterInput.split(",").map { it.trim() }.filter { it.isNotBlank() }
                                                         updateRosterTemplate(editingRosterId!!, rosterTemplateName, rosterNames)
                                                         editingRosterId = null
-                                                        editingRosterName = ""
                                                         sectionState = sectionState.copy(isRosterSetupOpen = false)
                                                     },
                                                     modifier = Modifier.fillMaxWidth(),
@@ -2674,7 +3005,6 @@ fun WaveUnitsApp() {
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
                                                 ) { Text("Save as New Copy") }
                                             } else {
-                                                // CREATE MODE
                                                 Button(
                                                     onClick = {
                                                         rosterNames = rosterInput.split(",").map { it.trim() }.filter { it.isNotBlank() }
@@ -2710,7 +3040,7 @@ fun WaveUnitsApp() {
                                             Button(onClick = { sectionState = sectionState.copy(isSavedRostersOpen = false) },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                            ) { Text("? Back") }
+                                            ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text("Saved Rosters", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                             Spacer(modifier = Modifier.height(8.dp))
@@ -2737,9 +3067,7 @@ fun WaveUnitsApp() {
                                                                 Spacer(modifier = Modifier.width(6.dp))
                                                                 Button(
                                                                     onClick = {
-                                                                        // Open in edit mode
                                                                         editingRosterId = r.id
-                                                                        editingRosterName = r.name
                                                                         rosterTemplateName = r.name
                                                                         rosterInput = r.names.joinToString(", ")
                                                                         rosterNames = r.names
@@ -2769,7 +3097,7 @@ fun WaveUnitsApp() {
                                             Button(onClick = { sectionState = sectionState.copy(isDashboardOpen = false) },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                            ) { Text("? Back") }
+                                            ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                 colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
@@ -2836,7 +3164,7 @@ fun WaveUnitsApp() {
                                             Button(onClick = { sectionState = sectionState.copy(isPrintableReportOpen = false) },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                            ) { Text("? Back") }
+                                            ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text("Printable Report", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
                                             Spacer(modifier = Modifier.height(8.dp))
@@ -2859,7 +3187,7 @@ fun WaveUnitsApp() {
                                             Button(onClick = { sectionState = sectionState.copy(isMarkedSheetsOpen = false) },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                            ) { Text("? Back") }
+                                            ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text("Marked Sheets", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                             Spacer(modifier = Modifier.height(8.dp))
@@ -2898,7 +3226,7 @@ fun WaveUnitsApp() {
                                             Button(onClick = { sectionState = sectionState.copy(isQuestionPaperOpen = false) },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                            ) { Text("? Back") }
+                                            ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text("Question Paper", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
                                             Spacer(modifier = Modifier.height(8.dp))
@@ -2919,7 +3247,7 @@ fun WaveUnitsApp() {
                                             Button(onClick = { sectionState = sectionState.copy(isAIAnswerSheetOpen = false) },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                            ) { Text("? Back") }
+                                            ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text("AI Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                             Spacer(modifier = Modifier.height(8.dp))
@@ -2940,7 +3268,7 @@ fun WaveUnitsApp() {
                                             Button(onClick = { sectionState = sectionState.copy(isManualAnswerSheetOpen = false) },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                            ) { Text("? Back") }
+                                            ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text("Manual Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
                                             Spacer(modifier = Modifier.height(8.dp))
@@ -2966,7 +3294,7 @@ fun WaveUnitsApp() {
                                             Button(onClick = { sectionState = sectionState.copy(isCollectedSheetsOpen = false) },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                            ) { Text("? Back") }
+                                            ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text("Collected Sheets (${collectedStudentAnswerSheets.size})",
                                                 fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
@@ -3057,7 +3385,7 @@ fun WaveUnitsApp() {
                                     ) {
                                         Button(onClick = { selectedStudent = null },
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                        ) { Text("? Back") }
+                                        ) { Text("Back", maxLines = 1) }
                                         Spacer(modifier = Modifier.width(12.dp))
                                         Text("Student: ${s.name}", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                     }
@@ -3098,7 +3426,7 @@ fun WaveUnitsApp() {
                                     ) {
                                         Button(onClick = { currentView = "projectDetail" },
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                        ) { Text("? Back") }
+                                        ) { Text("Back", maxLines = 1) }
                                         Spacer(modifier = Modifier.width(12.dp))
                                         Text("Exam Analytics", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                     }
