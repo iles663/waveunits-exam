@@ -807,6 +807,9 @@ fun WaveUnitsApp() {
     var showAddSubjectDialog by remember { mutableStateOf(false) }
     var showNewExamDialog by remember { mutableStateOf(false) }
 
+    // Confirmation dialog state for deleting a grade with exams
+    var pendingGradeDelete by remember { mutableStateOf<String?>(null) }
+
     var scanPhase by remember { mutableStateOf("") }
     var progressText by remember { mutableStateOf("") }
     var extractedQuestions by remember { mutableStateOf<List<QuestionData>>(emptyList()) }
@@ -893,6 +896,60 @@ fun WaveUnitsApp() {
         currentView = "home"
     }
 
+    // ===== SEQUENCED LOAD — tree first, then projects =====
+    // Both run in a single coroutine, awaited in order, so the fallback
+    // in the home screen never sees an empty tree alongside a populated
+    // project list. This fixes the "flash" of a different tree.
+    fun loadTreeAndProjects() {
+        scope.launch {
+            val uid = auth.currentUser?.uid ?: return@launch
+            // 1. Tree first
+            try {
+                val doc = db.collection("teacherTree").document(uid).get().await()
+                if (doc.exists()) {
+                    val grades = (doc.get("grades") as? List<*>)?.filterIsInstance<String>() ?: emptyList()
+                    val subjectsRaw = doc.get("subjectsByGrade") as? Map<String, Any> ?: emptyMap()
+                    val subjectsMap = mutableMapOf<String, List<String>>()
+                    for ((g, v) in subjectsRaw) {
+                        val list = (v as? List<*>)?.filterIsInstance<String>() ?: emptyList()
+                        subjectsMap[g] = list
+                    }
+                    treeGrades = grades
+                    treeSubjects = subjectsMap
+                } else {
+                    treeGrades = emptyList()
+                    treeSubjects = emptyMap()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Tree load error: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+            // 2. Then projects — tree is already in place
+            try {
+                val result = db.collection("exams").whereEqualTo("teacherId", uid).get().await()
+                projects = result.documents.map { doc ->
+                    val createdAtMillis = parseCreatedAt(doc.get("createdAt"))
+                    ExamProject(
+                        id = doc.id,
+                        title = doc.getString("title") ?: "",
+                        subjectKey = doc.getString("subjectKey") ?: "",
+                        grade = doc.getString("grade") ?: "",
+                        status = doc.getString("status") ?: "created",
+                        createdAt = formatTimestamp(createdAtMillis),
+                        createdAtMillis = createdAtMillis,
+                        questionPaperText = doc.getString("questionPaperText") ?: "",
+                        aiAnswerSheet = doc.getString("aiAnswerSheet") ?: "",
+                        simplifiedAnswerKey = doc.getString("simplifiedAnswerKey") ?: "",
+                        questionPaperImages = doc.get("questionPaperImages") as? List<String> ?: emptyList(),
+                        allQuestionTexts = doc.get("allQuestionTexts") as? List<String> ?: emptyList(),
+                        answerKey = doc.getString("answerKey") ?: ""
+                    )
+                }.sortedByDescending { it.createdAtMillis }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     fun loadTree() {
         scope.launch {
             try {
@@ -914,6 +971,35 @@ fun WaveUnitsApp() {
                 }
             } catch (e: Exception) {
                 Toast.makeText(context, "Tree load error: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun loadProjects() {
+        scope.launch {
+            try {
+                val uid = auth.currentUser?.uid ?: return@launch
+                val result = db.collection("exams").whereEqualTo("teacherId", uid).get().await()
+                projects = result.documents.map { doc ->
+                    val createdAtMillis = parseCreatedAt(doc.get("createdAt"))
+                    ExamProject(
+                        id = doc.id,
+                        title = doc.getString("title") ?: "",
+                        subjectKey = doc.getString("subjectKey") ?: "",
+                        grade = doc.getString("grade") ?: "",
+                        status = doc.getString("status") ?: "created",
+                        createdAt = formatTimestamp(createdAtMillis),
+                        createdAtMillis = createdAtMillis,
+                        questionPaperText = doc.getString("questionPaperText") ?: "",
+                        aiAnswerSheet = doc.getString("aiAnswerSheet") ?: "",
+                        simplifiedAnswerKey = doc.getString("simplifiedAnswerKey") ?: "",
+                        questionPaperImages = doc.get("questionPaperImages") as? List<String> ?: emptyList(),
+                        allQuestionTexts = doc.get("allQuestionTexts") as? List<String> ?: emptyList(),
+                        answerKey = doc.getString("answerKey") ?: ""
+                    )
+                }.sortedByDescending { it.createdAtMillis }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -969,31 +1055,35 @@ fun WaveUnitsApp() {
         saveTree(treeGrades, newSubjects)
     }
 
-    fun loadProjects() {
+    // Deletes all exams under a grade, then removes the grade from the tree.
+    // Prevents orphan exams from resurrecting the grade via the fallback.
+    fun deleteGradeAndItsExams(grade: String) {
         scope.launch {
             try {
                 val uid = auth.currentUser?.uid ?: return@launch
-                val result = db.collection("exams").whereEqualTo("teacherId", uid).get().await()
-                projects = result.documents.map { doc ->
-                    val createdAtMillis = parseCreatedAt(doc.get("createdAt"))
-                    ExamProject(
-                        id = doc.id,
-                        title = doc.getString("title") ?: "",
-                        subjectKey = doc.getString("subjectKey") ?: "",
-                        grade = doc.getString("grade") ?: "",
-                        status = doc.getString("status") ?: "created",
-                        createdAt = formatTimestamp(createdAtMillis),
-                        createdAtMillis = createdAtMillis,
-                        questionPaperText = doc.getString("questionPaperText") ?: "",
-                        aiAnswerSheet = doc.getString("aiAnswerSheet") ?: "",
-                        simplifiedAnswerKey = doc.getString("simplifiedAnswerKey") ?: "",
-                        questionPaperImages = doc.get("questionPaperImages") as? List<String> ?: emptyList(),
-                        allQuestionTexts = doc.get("allQuestionTexts") as? List<String> ?: emptyList(),
-                        answerKey = doc.getString("answerKey") ?: ""
-                    )
-                }.sortedByDescending { it.createdAtMillis }
+                val examsToDelete = projects.filter { it.grade == grade }
+                for (exam in examsToDelete) {
+                    try {
+                        // Delete marked sheets subcollection first
+                        val ms = db.collection("exams").document(exam.id).collection("markedSheets").get().await()
+                        for (d in ms.documents) d.reference.delete().await()
+                        // Delete aiResponses subcollection
+                        val ar = db.collection("exams").document(exam.id).collection("aiResponses").get().await()
+                        for (d in ar.documents) d.reference.delete().await()
+                        // Delete the exam doc
+                        db.collection("exams").document(exam.id).delete().await()
+                        // Delete results for this exam
+                        val rs = db.collection("results").whereEqualTo("examId", exam.id).get().await()
+                        for (d in rs.documents) d.reference.delete().await()
+                    } catch (_: Exception) {}
+                }
+                // Now remove the grade from the tree
+                deleteGradeFromTree(grade)
+                // And refresh in-memory state
+                loadProjects()
+                Toast.makeText(context, "Deleted $grade and ${examsToDelete.size} exam(s)", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
-                Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Delete error: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -1215,6 +1305,9 @@ fun WaveUnitsApp() {
         }
     }
 
+    // ===== SERIES ANALYTICS — batched results query =====
+    // One Firestore round-trip for all results in the series, instead of
+    // one per exam. Firestore whereIn caps at 30 values, so we chunk.
     fun loadSeriesAnalytics(grade: String, subjectKey: String) {
         scope.launch {
             try {
@@ -1227,30 +1320,38 @@ fun WaveUnitsApp() {
                     return@launch
                 }
 
-                val examPoints = mutableListOf<ExamPoint>()
-                val perExamResults = mutableMapOf<String, List<StudentResult>>()
+                val examIds = seriesExams.map { it.id }
+                val perExamResults = mutableMapOf<String, MutableList<StudentResult>>()
 
-                for (exam in seriesExams) {
-                    val resultsQuery = db.collection("results").whereEqualTo("examId", exam.id).get().await()
-                    val results = resultsQuery.documents.map { doc ->
+                // Chunk examIds into groups of 30 (Firestore whereIn limit)
+                val chunks = examIds.chunked(30)
+                for (chunk in chunks) {
+                    val q = db.collection("results").whereIn("examId", chunk).get().await()
+                    for (doc in q.documents) {
+                        val examId = doc.getString("examId") ?: continue
                         val questionsData = doc.get("questions") as? List<Map<String, Any>> ?: emptyList()
-                        StudentResult(
+                        val r = StudentResult(
                             studentName = doc.getString("studentName") ?: "Unknown",
                             score = (doc.get("score") as? Number)?.toInt() ?: 0,
                             totalMarks = (doc.get("totalMarks") as? Number)?.toInt() ?: 0,
                             percentage = (doc.get("percentage") as? Number)?.toDouble() ?: 0.0,
-                            questions = questionsData.map { q ->
+                            questions = questionsData.map { qq ->
                                 QuestionResultData(
-                                    (q["questionNumber"] as? Number)?.toInt() ?: 0,
-                                    q["topic"] as? String ?: "General",
-                                    q["studentAnswer"] as? String ?: "",
-                                    q["correctAnswer"] as? String ?: "",
-                                    q["isCorrect"] as? Boolean ?: false
+                                    (qq["questionNumber"] as? Number)?.toInt() ?: 0,
+                                    qq["topic"] as? String ?: "General",
+                                    qq["studentAnswer"] as? String ?: "",
+                                    qq["correctAnswer"] as? String ?: "",
+                                    qq["isCorrect"] as? Boolean ?: false
                                 )
                             }
                         )
+                        perExamResults.getOrPut(examId) { mutableListOf() }.add(r)
                     }
-                    perExamResults[exam.id] = results
+                }
+
+                val examPoints = mutableListOf<ExamPoint>()
+                for (exam in seriesExams) {
+                    val results = perExamResults[exam.id] ?: emptyList()
                     val avg = if (results.isNotEmpty()) results.map { it.percentage }.average() else 0.0
                     examPoints.add(ExamPoint(exam.id, exam.title, exam.createdAtMillis, avg, results.size))
                 }
@@ -1620,8 +1721,9 @@ fun WaveUnitsApp() {
         if (isLoggedIn) {
             // Clear first, then load — prevents cross-account state leak
             clearAllState()
-            loadTree()
-            loadProjects()
+            // Sequenced load: tree before projects, so the fallback in
+            // the home screen never sees an empty tree with a full project list
+            loadTreeAndProjects()
             loadSavedRosters()
         }
     }
@@ -1759,6 +1861,39 @@ fun WaveUnitsApp() {
         )
     }
 
+    // Confirmation dialog for deleting a grade that has exams
+    val gradeToConfirm = pendingGradeDelete
+    if (gradeToConfirm != null) {
+        val examCount = projects.count { it.grade == gradeToConfirm }
+        val subjCount = treeSubjects[gradeToConfirm]?.size ?: 0
+        AlertDialog(
+            onDismissRequest = { pendingGradeDelete = null },
+            title = { Text("Delete $gradeToConfirm?") },
+            text = {
+                Text(
+                    if (examCount == 0)
+                        "This removes the grade and $subjCount subject(s) from your tree."
+                    else
+                        "This will permanently delete the grade, $subjCount subject(s), and $examCount exam(s) with all their results. This cannot be undone.",
+                    color = Color.White
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val g = gradeToConfirm
+                        pendingGradeDelete = null
+                        deleteGradeAndItsExams(g)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingGradeDelete = null }) { Text("Cancel") }
+            }
+        )
+    }
+
     MaterialTheme(
         colorScheme = darkColorScheme(
             primary = Color(0xFF2563eb),
@@ -1849,7 +1984,15 @@ fun WaveUnitsApp() {
                                     saveLoginState(false)
                                     clearAllState()
                                 }
-                            }) { Text("Log out", fontSize = 14.sp) }
+                            }) {
+                                Text(
+                                    "Log out",
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    modifier = Modifier.padding(horizontal = 4.dp)
+                                )
+                            }
                         }
                     )
                 }
@@ -1894,8 +2037,7 @@ fun WaveUnitsApp() {
                                     Spacer(modifier = Modifier.height(12.dp))
                                     Button(
                                         onClick = {
-                                            loadTree()
-                                            loadProjects()
+                                            loadTreeAndProjects()
                                             Toast.makeText(context, "Refreshing...", Toast.LENGTH_SHORT).show()
                                         },
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa)),
@@ -1927,12 +2069,12 @@ fun WaveUnitsApp() {
                                                                 showAddSubjectDialog = true
                                                             },
                                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                                        ) { Text("+ Subject") }
+                                                        ) { Text("+ Subject", fontSize = 13.sp, maxLines = 1) }
                                                         Spacer(modifier = Modifier.width(6.dp))
                                                         Button(
-                                                            onClick = { deleteGradeFromTree(grade) },
+                                                            onClick = { pendingGradeDelete = grade },
                                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
-                                                        ) { Text("???") }
+                                                        ) { Text("Delete", fontSize = 12.sp, maxLines = 1) }
                                                     }
                                                 }
                                                 Spacer(modifier = Modifier.height(10.dp))
@@ -1963,7 +2105,7 @@ fun WaveUnitsApp() {
                                                                 Button(
                                                                     onClick = { deleteSubjectFromTree(grade, subject) },
                                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7f1d1d))
-                                                                ) { Text("???", fontSize = 12.sp) }
+                                                                ) { Text("Delete", fontSize = 11.sp, maxLines = 1) }
                                                             }
                                                         }
                                                     }
