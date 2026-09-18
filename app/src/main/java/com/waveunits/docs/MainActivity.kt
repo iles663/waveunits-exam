@@ -9,6 +9,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import android.util.Base64
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -36,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInClient
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
@@ -361,7 +364,6 @@ fun generatePrintableMarkedSheets(markedSheets: List<MarkedAnswerSheetData>): St
 
 // ===== HTML ANSWER SHEET GENERATOR =====
 // Produces an A4 HTML file with three vertical slices per page.
-// Each slice: 65mm wide, 50 question rows, four brackets per row aligned under A B C D.
 fun buildAnswerSheetHtml(
     schoolName: String,
     grade: String,
@@ -370,7 +372,7 @@ fun buildAnswerSheetHtml(
     term: String,
     dateText: String,
     questionCount: Int,
-    studentNames: List<String>  // empty list => one blank template
+    studentNames: List<String>
 ): String {
     val names = if (studentNames.isEmpty()) listOf("") else studentNames
     val sb = StringBuilder()
@@ -400,7 +402,6 @@ fun buildAnswerSheetHtml(
         for (i in 0 until 3) {
             val studentName = chunk.getOrNull(i) ?: ""
             if (studentName.isBlank() && i >= chunk.size) {
-                // empty slot: draw a small placeholder so page count stays consistent
                 sb.append("<div class=\"slice\" style=\"border-style:dashed; color:#aaa; font-size:8pt; padding:2mm;\">(empty)</div>\n")
             } else {
                 sb.append("<div class=\"slice\">\n")
@@ -524,8 +525,6 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     }
 }
 
-// Parses out the printed student name from a transcribed sheet.
-// Returns null if not found.
 private fun extractPrintedStudentName(transcription: String): String? {
     if (transcription.isBlank()) return null
     val lines = transcription.lines()
@@ -565,8 +564,7 @@ private suspend fun gradeWithAI(
             - The student writes exactly ONE letter (A/B/C/D) inside the
               bracket of the column they chose. Example: [ ] [B] [ ] [ ]
               means they chose B.
-            - If TWO brackets have letters (student changed mind or made
-              an error), take the LEFTMOST one.
+            - If TWO brackets have letters, take the LEFTMOST one.
             - If ALL FOUR brackets are EMPTY, the answer is blank -> WRONG.
 
             MATCHING: Compare each student answer to the correct answer from
@@ -970,14 +968,12 @@ fun WaveUnitsApp() {
     var answerKey by remember { mutableStateOf("") }
     var isGrading by remember { mutableStateOf(false) }
 
-    // Roster / saved templates
     var savedRosters by remember { mutableStateOf<List<RosterTemplate>>(emptyList()) }
     var rosterInput by remember { mutableStateOf("") }
     var rosterTemplateName by remember { mutableStateOf("") }
     var editingRosterId by remember { mutableStateOf<String?>(null) }
     var rosterNames by remember { mutableStateOf<List<String>>(emptyList()) }
 
-    // Answer sheet generator state
     var genSchool by remember { mutableStateOf("") }
     var genGrade by remember { mutableStateOf("") }
     var genSubject by remember { mutableStateOf("") }
@@ -1008,9 +1004,7 @@ fun WaveUnitsApp() {
     var allResults by remember { mutableStateOf<List<StudentResult>>(emptyList()) }
     var selectedPortfolioStudent by remember { mutableStateOf<ClassPathStudentPortfolio?>(null) }
 
-    // Last-seen printed name during a scan session — pages without header inherit it
     var lastSeenPrintedName by remember { mutableStateOf<String?>(null) }
-    var pendingSheetsQueue by remember { mutableStateOf<List<StudentAnswerSheetData>>(emptyList()) }
 
     fun saveLoginState(isLogged: Boolean) {
         prefs.edit().putBoolean("isLoggedIn", isLogged)
@@ -1060,7 +1054,6 @@ fun WaveUnitsApp() {
         allResults = emptyList()
         initialLoadComplete = false
         lastSeenPrintedName = null
-        pendingSheetsQueue = emptyList()
         currentView = "home"
     }
 
@@ -1659,7 +1652,6 @@ fun WaveUnitsApp() {
                     }
                 }
 
-                // Per-student portfolios for the class path
                 val allStudentNames = mutableSetOf<String>()
                 for (exam in seriesExams) {
                     perExamResults[exam.id]?.forEach { r ->
@@ -1924,7 +1916,6 @@ fun WaveUnitsApp() {
         }
     }
 
-    // Persist a scanned sheet immediately, using the printed name if available
     fun persistScannedSheet(sheet: StudentAnswerSheetData) {
         val newList = collectedStudentAnswerSheets + sheet
         collectedStudentAnswerSheets = newList
@@ -2047,7 +2038,6 @@ fun WaveUnitsApp() {
                                     matched = true
                                     lastSeenPrintedName = printedName
                                 } else if (lastSeenPrintedName != null) {
-                                    // Multi-page sheet inherits previous printed name
                                     resolvedName = lastSeenPrintedName!!
                                     matched = true
                                 } else {
@@ -2069,7 +2059,6 @@ fun WaveUnitsApp() {
                             isExtracting = false
                             progressText = "Transcribed ${uris.size} sheet(s)."
                             scanPhase = ""
-                            // If any unmatched, offer to rename now
                             val unmatched = collectedStudentAnswerSheets.filter { !it.matched }
                             if (unmatched.isNotEmpty()) {
                                 pendingSheetRename = unmatched.first()
@@ -2324,7 +2313,6 @@ fun WaveUnitsApp() {
                         if (n.isNotBlank()) {
                             renameSheet(renameTarget.studentName, n)
                             pendingSheetRename = null
-                            // Check if any more unmatched
                             val remaining = collectedStudentAnswerSheets.filter { !it.matched }
                             if (remaining.isNotEmpty()) pendingSheetRename = remaining.first()
                         }
@@ -3285,13 +3273,35 @@ fun WaveUnitsApp() {
                                             }
                                             if (genPreviewHtml.isNotBlank()) {
                                                 Text("Preview (first sheet):", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 13.sp)
-                                                Spacer(modifier = Modifier.height(4.dp))
-                                                Text(
-                                                    genPreviewHtml.take(2000),
-                                                    color = Color.White,
-                                                    fontSize = 8.sp,
-                                                    fontFamily = FontFamily.Monospace
-                                                )
+                                                Text("Pinch to zoom. Scroll to see the A4 layout.", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Card(
+                                                    modifier = Modifier.fillMaxWidth().height(600.dp),
+                                                    colors = CardDefaults.cardColors(containerColor = Color.White)
+                                                ) {
+                                                    AndroidView(
+                                                        factory = { ctx ->
+                                                            WebView(ctx).apply {
+                                                                webViewClient = WebViewClient()
+                                                                settings.javaScriptEnabled = false
+                                                                settings.loadWithOverviewMode = true
+                                                                settings.useWideViewPort = true
+                                                                settings.builtInZoomControls = true
+                                                                settings.displayZoomControls = false
+                                                            }
+                                                        },
+                                                        update = { webView ->
+                                                            webView.loadDataWithBaseURL(
+                                                                null,
+                                                                genPreviewHtml,
+                                                                "text/html",
+                                                                "utf-8",
+                                                                null
+                                                            )
+                                                        },
+                                                        modifier = Modifier.fillMaxSize()
+                                                    )
+                                                }
                                             }
                                         }
                                     }
