@@ -363,7 +363,8 @@ fun generatePrintableMarkedSheets(markedSheets: List<MarkedAnswerSheetData>): St
 }
 
 // ===== HTML ANSWER SHEET GENERATOR =====
-// Produces an A4 HTML file with three vertical slices per page.
+// A4 landscape, 2 answer sheets per page, one vertical cut between them.
+// Each slice: 144mm wide x 204mm tall, columns NO | A | B | C | D filling edge to edge.
 fun buildAnswerSheetHtml(
     schoolName: String,
     grade: String,
@@ -375,74 +376,136 @@ fun buildAnswerSheetHtml(
     studentNames: List<String>
 ): String {
     val names = if (studentNames.isEmpty()) listOf("") else studentNames
+    val cappedCount = if (questionCount > 50) 50 else questionCount
     val sb = StringBuilder()
 
     sb.append("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\n")
+    sb.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=6.0\">\n")
     sb.append("<title>WaveUnits Answer Sheets</title>\n")
     sb.append("<style>\n")
-    sb.append("@page { size: A4 portrait; margin: 5mm; }\n")
-    sb.append("* { box-sizing: border-box; }\n")
-    sb.append("body { margin:0; padding:0; font-family: Arial, Helvetica, sans-serif; background:#fff; }\n")
-    sb.append(".page { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 2mm; page-break-after: always; padding: 0; height: 287mm; }\n")
-    sb.append(".slice { display: flex; flex-direction: column; border: 1px solid #000; padding: 1.5mm; overflow: hidden; height: 100%; }\n")
-    sb.append(".school { font-weight: bold; font-size: 9pt; text-align: center; padding-bottom: 1mm; border-bottom: 1px solid #000; }\n")
-    sb.append(".header { font-size: 7pt; line-height: 1.35; padding: 1mm 0; border-bottom: 1px solid #000; }\n")
+
+    // Print: A4 landscape, 2 slices per page, one vertical cut in between
+    sb.append("@page { size: A4 landscape; margin: 3mm; }\n")
+
+    sb.append("* { box-sizing: border-box; margin: 0; padding: 0; }\n")
+    sb.append("html, body { font-family: Arial, Helvetica, sans-serif; background: #e5e7eb; }\n")
+
+    // Screen vs print: on screen, page fits viewport. On print, exact A4 landscape.
+    sb.append("@media print {\n")
+    sb.append("  body { background: #fff; }\n")
+    sb.append("  .page {\n")
+    sb.append("    width: 291mm;\n")
+    sb.append("    height: 204mm;\n")
+    sb.append("    display: grid;\n")
+    sb.append("    grid-template-columns: 1fr 3mm 1fr;\n")
+    sb.append("    page-break-after: always;\n")
+    sb.append("    background: #fff;\n")
+    sb.append("  }\n")
+    sb.append("  .cut { background: #fff; }\n")
+    sb.append("}\n")
+
+    sb.append("@media screen {\n")
+    sb.append("  body { padding: 8px; }\n")
+    sb.append("  .page {\n")
+    sb.append("    width: 100%;\n")
+    sb.append("    max-width: 1100px;\n")
+    sb.append("    margin: 0 auto 16px auto;\n")
+    sb.append("    aspect-ratio: 291 / 204;\n")
+    sb.append("    display: grid;\n")
+    sb.append("    grid-template-columns: 1fr 3mm 1fr;\n")
+    sb.append("    background: #fff;\n")
+    sb.append("    box-shadow: 0 2px 8px rgba(0,0,0,0.2);\n")
+    sb.append("  }\n")
+    sb.append("  .cut {\n")
+    sb.append("    background: repeating-linear-gradient(to bottom, #999 0 4px, transparent 4px 8px);\n")
+    sb.append("  }\n")
+    sb.append("}\n")
+
+    sb.append(".slice {\n")
+    sb.append("  display: flex;\n")
+    sb.append("  flex-direction: column;\n")
+    sb.append("  border: 1px solid #000;\n")
+    sb.append("  overflow: hidden;\n")
+    sb.append("  background: #fff;\n")
+    sb.append("}\n")
+
+    sb.append(".school { font-weight: bold; font-size: 10pt; text-align: center; padding: 1mm; border-bottom: 1px solid #000; }\n")
+    sb.append(".header { font-size: 7.5pt; line-height: 1.3; padding: 1mm 1.5mm; border-bottom: 1px solid #000; }\n")
     sb.append(".header div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n")
-    sb.append(".grid { flex: 1; display: flex; flex-direction: column; padding-top: 1mm; }\n")
-    sb.append(".grid-header { display: grid; grid-template-columns: 6mm 13mm 13mm 13mm 13mm; font-size: 7pt; font-weight: bold; text-align: center; border-bottom: 1px solid #000; padding-bottom: 0.5mm; }\n")
-    sb.append(".row { display: grid; grid-template-columns: 6mm 13mm 13mm 13mm 13mm; font-size: 7pt; text-align: center; border-bottom: 0.3mm solid #666; padding: 0.6mm 0; }\n")
-    sb.append(".num { font-weight: bold; text-align: right; padding-right: 1mm; }\n")
-    sb.append(".bracket { font-family: monospace; font-size: 8pt; }\n")
-    sb.append(".instructions { font-size: 6.5pt; padding-top: 1mm; border-top: 1px solid #000; line-height: 1.3; }\n")
+    sb.append(".header b { display: inline-block; min-width: 13mm; }\n")
+
+    sb.append(".grid { flex: 1; display: flex; flex-direction: column; }\n")
+    sb.append(".grid-header, .row { display: grid; grid-template-columns: 12mm 1fr 1fr 1fr 1fr; text-align: center; }\n")
+    sb.append(".grid-header { font-size: 8pt; font-weight: bold; border-bottom: 1px solid #000; }\n")
+    sb.append(".grid-header > div, .row > div { padding: 0.4mm 0; border-right: 0.3mm solid #666; }\n")
+    sb.append(".grid-header > div:last-child, .row > div:last-child { border-right: none; }\n")
+    sb.append(".row { font-size: 7.5pt; border-bottom: 0.3mm solid #666; }\n")
+    sb.append(".row .num { font-weight: bold; text-align: right; padding-right: 1mm; }\n")
+    sb.append(".row .bracket { font-family: monospace; font-size: 8pt; }\n")
+    sb.append(".instructions { font-size: 6.5pt; padding: 1mm 1.5mm; border-top: 1px solid #000; line-height: 1.3; }\n")
+
     sb.append("</style>\n</head><body>\n")
 
-    val chunks = names.chunked(3)
+    val chunks = names.chunked(2)
     for (chunk in chunks) {
         sb.append("<div class=\"page\">\n")
-        for (i in 0 until 3) {
-            val studentName = chunk.getOrNull(i) ?: ""
-            if (studentName.isBlank() && i >= chunk.size) {
-                sb.append("<div class=\"slice\" style=\"border-style:dashed; color:#aaa; font-size:8pt; padding:2mm;\">(empty)</div>\n")
-            } else {
-                sb.append("<div class=\"slice\">\n")
-                if (schoolName.isNotBlank()) {
-                    sb.append("<div class=\"school\">").append(htmlEscape(schoolName)).append("</div>\n")
-                } else {
-                    sb.append("<div class=\"school\">&nbsp;</div>\n")
-                }
-                sb.append("<div class=\"header\">\n")
-                sb.append("<div><b>NAME:</b> ").append(htmlEscape(studentName.ifBlank { "_____________________" })).append("</div>\n")
-                sb.append("<div><b>GRADE:</b> ").append(htmlEscape(grade.ifBlank { "-" })).append("</div>\n")
-                sb.append("<div><b>SUBJ:</b> ").append(htmlEscape(subject.ifBlank { "-" })).append("</div>\n")
-                sb.append("<div><b>EXAM:</b> ").append(htmlEscape(examTitle.ifBlank { "-" })).append("</div>\n")
-                sb.append("<div><b>TERM:</b> ").append(htmlEscape(term.ifBlank { "-" })).append("</div>\n")
-                sb.append("<div><b>DATE:</b> ").append(htmlEscape(dateText.ifBlank { "-" })).append("</div>\n")
-                sb.append("</div>\n")
-
-                sb.append("<div class=\"grid\">\n")
-                sb.append("<div class=\"grid-header\">")
-                sb.append("<div>NO</div><div>A</div><div>B</div><div>C</div><div>D</div>")
-                sb.append("</div>\n")
-                for (q in 1..questionCount) {
-                    sb.append("<div class=\"row\">")
-                    sb.append("<div class=\"num\">").append(q).append("</div>")
-                    sb.append("<div class=\"bracket\">[&nbsp;]</div>")
-                    sb.append("<div class=\"bracket\">[&nbsp;]</div>")
-                    sb.append("<div class=\"bracket\">[&nbsp;]</div>")
-                    sb.append("<div class=\"bracket\">[&nbsp;]</div>")
-                    sb.append("</div>\n")
-                }
-                sb.append("</div>\n")
-
-                sb.append("<div class=\"instructions\">Write A/B/C/D inside the bracket of your choice. Use a dark pen. Do not scribble or cross out.</div>\n")
-                sb.append("</div>\n")
-            }
-        }
+        // Slice 1
+        appendSlice(sb, chunk.getOrNull(0) ?: "", schoolName, grade, subject, examTitle, term, dateText, cappedCount)
+        // Cut line
+        sb.append("<div class=\"cut\"></div>\n")
+        // Slice 2
+        appendSlice(sb, chunk.getOrNull(1) ?: "", schoolName, grade, subject, examTitle, term, dateText, cappedCount)
         sb.append("</div>\n")
     }
 
     sb.append("</body></html>\n")
     return sb.toString()
+}
+
+private fun appendSlice(
+    sb: StringBuilder,
+    studentName: String,
+    schoolName: String,
+    grade: String,
+    subject: String,
+    examTitle: String,
+    term: String,
+    dateText: String,
+    questionCount: Int
+) {
+    if (studentName.isBlank() && schoolName.isBlank() && grade.isBlank() && subject.isBlank()) {
+        // Empty filler
+        sb.append("<div class=\"slice\" style=\"border-style:dashed; color:#aaa; font-size:8pt; padding:2mm;\">(empty)</div>\n")
+        return
+    }
+    sb.append("<div class=\"slice\">\n")
+    sb.append("<div class=\"school\">").append(htmlEscape(schoolName.ifBlank { "&nbsp;" })).append("</div>\n")
+    sb.append("<div class=\"header\">\n")
+    sb.append("<div><b>NAME:</b> ").append(htmlEscape(studentName.ifBlank { "_____________________" })).append("</div>\n")
+    sb.append("<div><b>GRADE:</b> ").append(htmlEscape(grade.ifBlank { "-" })).append("</div>\n")
+    sb.append("<div><b>SUBJ:</b> ").append(htmlEscape(subject.ifBlank { "-" })).append("</div>\n")
+    sb.append("<div><b>EXAM:</b> ").append(htmlEscape(examTitle.ifBlank { "-" })).append("</div>\n")
+    sb.append("<div><b>TERM:</b> ").append(htmlEscape(term.ifBlank { "-" })).append("</div>\n")
+    sb.append("<div><b>DATE:</b> ").append(htmlEscape(dateText.ifBlank { "-" })).append("</div>\n")
+    sb.append("</div>\n")
+
+    sb.append("<div class=\"grid\">\n")
+    sb.append("<div class=\"grid-header\">")
+    sb.append("<div>NO</div><div>A</div><div>B</div><div>C</div><div>D</div>")
+    sb.append("</div>\n")
+    for (q in 1..questionCount) {
+        sb.append("<div class=\"row\">")
+        sb.append("<div class=\"num\">").append(q).append("</div>")
+        sb.append("<div class=\"bracket\">[&nbsp;]</div>")
+        sb.append("<div class=\"bracket\">[&nbsp;]</div>")
+        sb.append("<div class=\"bracket\">[&nbsp;]</div>")
+        sb.append("<div class=\"bracket\">[&nbsp;]</div>")
+        sb.append("</div>\n")
+    }
+    sb.append("</div>\n")
+
+    sb.append("<div class=\"instructions\">Write the letter A, B, C, or D inside the bracket of your choice. Use a dark pen. Do not scribble or cross out.</div>\n")
+    sb.append("</div>\n")
 }
 
 fun htmlEscape(s: String): String =
@@ -463,20 +526,22 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
                 .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(180, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
+
             val prompt = """
-                This is a scanned answer sheet. At the very top of the page
-                there is a PRINTED header block (not handwritten) that looks
-                like this:
+                This is a scanned student answer sheet. Report what is
+                actually on the page. Do not invent anything that is not
+                there.
 
-                NAME: <student name>
-                GRADE: <grade>
-                SUBJ: <subject>
-                EXAM: <exam>
-                TERM: <term>
-                DATE: <date>
+                STEP 1 — Look for a printed header block at the top of the
+                page. It looks like:
+                  NAME: <student name>
+                  GRADE: <grade>
+                  SUBJ: <subject>
+                  EXAM: <exam>
+                  TERM: <term>
+                  DATE: <date>
 
-                If you can find that header block, output it FIRST exactly
-                in this format:
+                If that block exists, output it FIRST exactly:
 
                 ---STUDENT---
                 NAME: <name as printed>
@@ -484,21 +549,74 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
                 SUBJ: <subject as printed>
                 ---SHEET---
 
-                If the sheet has NO such printed header (blank template or
-                handwritten name), output:
+                If there is NO printed header block, but there IS a
+                handwritten name on the sheet (usually at the top), write
+                it after NAME: so the app can still identify the student:
+
+                ---STUDENT---
+                NAME: <handwritten name, your best reading>
+                ---SHEET---
+
+                If there is no name at all, output:
 
                 ---STUDENT---
                 NAME:
                 ---SHEET---
 
-                Then transcribe the question grid below the header. Each row
-                looks like: <num> | [ ] [ ] [ ] [ ] with one bracket per
-                column under A, B, C, D. If a student has written a letter
-                inside one bracket, print that letter inside its bracket.
-                If the bracket is empty, print [   ]. Preserve row order.
+                STEP 2 — Transcribe the answer section below the header.
+                Preserve whatever format the student used.
 
-                Do NOT summarise. Do NOT invent answers.
+                FORMAT A — Printed grid with brackets.
+                The page has a table with columns NO | A | B | C | D and
+                bracket cells like [ ] under each letter. Output each row
+                exactly as it appears:
+                  1 | [ ] [B] [ ] [ ]
+                  2 | [ ] [ ] [C] [ ]
+                  3 | [A] [ ] [ ] [ ]
+                Rules:
+                  - The student writes exactly ONE letter inside one
+                    bracket per row.
+                  - If two brackets contain letters, take the LEFTMOST
+                    one.
+                  - If a bracket has a mark but the letter is unreadable,
+                    print the column header letter (A/B/C/D) inside that
+                    bracket.
+                  - If a row has no letters in any bracket, keep all
+                    four brackets empty: [ ] [ ] [ ] [ ]
+                  - Preserve row order.
+
+                FORMAT B — Plain handwritten list.
+                The page shows numbers and letters without brackets,
+                like "1B  2C  3B  4A" possibly in two columns. Output:
+                  1 | B
+                  2 | C
+                  3 | B
+                Rules:
+                  - Only the letter the student wrote. No added brackets.
+                  - If a number has no letter next to it, output it blank:
+                    14 |
+                  - Preserve number order.
+
+                FORMAT C — Bubble sheet.
+                The page shows a bubble answer sheet with filled ovals.
+                Output the letter corresponding to the filled oval:
+                  1 | B
+                  2 | C
+                Unfilled rows = blank.
+
+                FORMAT D — Any other layout.
+                Tick marks in boxes, letters in a custom column,
+                handwriting in a form, anything else. Infer the student's
+                answer per question number and output:
+                  <number> | <letter>
+                Do not add brackets unless the original page has them.
+
+                STEP 3 — Output everything below the ---SHEET--- line in
+                the format that matches what is actually on the page.
+                Never invent brackets. Never invent answers.
+                Never summarise.
             """.trimIndent()
+
             val content = JSONArray()
                 .put(JSONObject().put("type", "text").put("text", prompt))
                 .put(JSONObject().put("type", "image_url")
@@ -555,20 +673,26 @@ private suspend fun gradeWithAI(
         val prompt = """
             TASK: Grade a student's answer sheet.
 
-            The printout below is a grid of numbered rows. Each row looks
-            like: <num> | [ ] [ ] [ ] [ ] where the four brackets are the
-            columns A, B, C, D in that order.
+            The printout below is the student's answers. It may be in one
+            of two formats:
 
-            HOW TO READ THE STUDENT'S ANSWER ON EACH ROW:
-            - Read the four bracket cells on that row.
-            - The student writes exactly ONE letter (A/B/C/D) inside the
-              bracket of the column they chose. Example: [ ] [B] [ ] [ ]
-              means they chose B.
-            - If TWO brackets have letters, take the LEFTMOST one.
-            - If ALL FOUR brackets are EMPTY, the answer is blank -> WRONG.
+            FORMAT A — grid with brackets:
+              1 | [ ] [B] [ ] [ ]
+              2 | [ ] [ ] [C] [ ]
+            The student writes exactly ONE letter inside one bracket per
+            row. The letter inside a bracket is the answer.
+            If TWO brackets have letters, take the LEFTMOST one.
+            If all four brackets are empty, the answer is blank -> WRONG.
 
-            MATCHING: Compare each student answer to the correct answer from
-            the ANSWER KEY below, matched by question number. Blank = wrong.
+            FORMAT B — simple list:
+              1 | B
+              2 | C
+            The letter after the number is the answer.
+            Missing number or blank after the pipe -> WRONG.
+
+            In either format, compare each student answer to the correct
+            answer from the ANSWER KEY below by question number.
+            Blank or missing = WRONG.
 
             ============ PART 1 - HUMAN-READABLE SHEET ============
             Write one line per graded question:
@@ -591,8 +715,8 @@ private suspend fun gradeWithAI(
 
             Q<number>|<studentLetter>|<correctLetter>|<C or W>|<topic>
 
-            Topic = the strand and sub-strand copied from the ANSWER KEY for
-            that question, in the form "Strand -> Sub-strand".
+            Topic = the strand and sub-strand copied from the ANSWER KEY
+            for that question, in the form "Strand -> Sub-strand".
 
             ===== STUDENT PRINTOUT =====
             $printout
@@ -2295,7 +2419,7 @@ fun WaveUnitsApp() {
             title = { Text("Unreadable name") },
             text = {
                 Column {
-                    Text("This sheet had no readable printed name. Type the student's name:",
+                    Text("This sheet had no readable name. Type the student's name:",
                         color = Color.White, fontSize = 13.sp)
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(
@@ -3132,7 +3256,7 @@ fun WaveUnitsApp() {
                                             ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text("Generate Answer Sheets (A4)", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                            Text("Three vertical slices per A4 page. One slice per student.", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                            Text("2 sheets per A4 landscape page. One cut down the middle.", color = Color(0xFF94a3b8), fontSize = 11.sp)
                                             Spacer(modifier = Modifier.height(12.dp))
 
                                             OutlinedTextField(value = genSchool, onValueChange = { genSchool = it },
@@ -3154,7 +3278,7 @@ fun WaveUnitsApp() {
                                                 label = { Text("Date") }, modifier = Modifier.fillMaxWidth())
                                             Spacer(modifier = Modifier.height(6.dp))
                                             OutlinedTextField(value = genQuestionCount, onValueChange = { genQuestionCount = it },
-                                                label = { Text("Number of Questions") }, modifier = Modifier.fillMaxWidth())
+                                                label = { Text("Number of Questions (max 50)") }, modifier = Modifier.fillMaxWidth())
                                             Spacer(modifier = Modifier.height(10.dp))
 
                                             Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -3273,7 +3397,7 @@ fun WaveUnitsApp() {
                                             }
                                             if (genPreviewHtml.isNotBlank()) {
                                                 Text("Preview (first sheet):", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 13.sp)
-                                                Text("Pinch to zoom. Scroll to see the A4 layout.", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                Text("Pinch to zoom. Landscape A4, 2 sheets per page.", color = Color(0xFF94a3b8), fontSize = 11.sp)
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 Card(
                                                     modifier = Modifier.fillMaxWidth().height(600.dp),
