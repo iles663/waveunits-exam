@@ -5,12 +5,17 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color as AndroidColor
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.pdf.PdfDocument
+import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
+import android.os.ParcelFileDescriptor
 import android.util.Base64
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -32,13 +37,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInClient
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
@@ -63,6 +68,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.io.FileWriter
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -362,10 +368,13 @@ fun generatePrintableMarkedSheets(markedSheets: List<MarkedAnswerSheetData>): St
     return sb.toString()
 }
 
-// ===== HTML ANSWER SHEET GENERATOR =====
-// A4 landscape, 2 answer sheets per page, one vertical cut between them.
-// Each slice: 144mm wide x 204mm tall, columns NO | A | B | C | D filling edge to edge.
-fun buildAnswerSheetHtml(
+// ===== PDF ANSWER SHEET GENERATOR =====
+// A4 landscape, 2 answer sheets per page, one vertical cut in the middle.
+// Uses Android's built-in PdfDocument. No external libraries.
+// Points are used (1 pt = 1/72 inch). A4 landscape = 842 x 595 pt.
+// 3mm ˜ 8.5pt, slice width 144mm ˜ 408.2pt.
+fun buildAnswerSheetPdf(
+    context: Context,
     schoolName: String,
     grade: String,
     subject: String,
@@ -373,97 +382,146 @@ fun buildAnswerSheetHtml(
     term: String,
     dateText: String,
     questionCount: Int,
-    studentNames: List<String>
-): String {
+    studentNames: List<String>,
+    filenameBase: String
+): String? {
     val names = if (studentNames.isEmpty()) listOf("") else studentNames
     val cappedCount = if (questionCount > 50) 50 else questionCount
-    val sb = StringBuilder()
 
-    sb.append("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\n")
-    sb.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=6.0\">\n")
-    sb.append("<title>WaveUnits Answer Sheets</title>\n")
-    sb.append("<style>\n")
+    val pdf = PdfDocument()
+    val pageWidth = 842f
+    val pageHeight = 595f
+    val margin = 8.5f
+    val cutGap = 8.5f
+    val sliceWidth = (pageWidth - 2 * margin - cutGap) / 2f
+    val sliceHeight = pageHeight - 2 * margin
 
-    // Print: A4 landscape, 2 slices per page, one vertical cut in between
-    sb.append("@page { size: A4 landscape; margin: 3mm; }\n")
-
-    sb.append("* { box-sizing: border-box; margin: 0; padding: 0; }\n")
-    sb.append("html, body { font-family: Arial, Helvetica, sans-serif; background: #e5e7eb; }\n")
-
-    // Screen vs print: on screen, page fits viewport. On print, exact A4 landscape.
-    sb.append("@media print {\n")
-    sb.append("  body { background: #fff; }\n")
-    sb.append("  .page {\n")
-    sb.append("    width: 291mm;\n")
-    sb.append("    height: 204mm;\n")
-    sb.append("    display: grid;\n")
-    sb.append("    grid-template-columns: 1fr 3mm 1fr;\n")
-    sb.append("    page-break-after: always;\n")
-    sb.append("    background: #fff;\n")
-    sb.append("  }\n")
-    sb.append("  .cut { background: #fff; }\n")
-    sb.append("}\n")
-
-    sb.append("@media screen {\n")
-    sb.append("  body { padding: 8px; }\n")
-    sb.append("  .page {\n")
-    sb.append("    width: 100%;\n")
-    sb.append("    max-width: 1100px;\n")
-    sb.append("    margin: 0 auto 16px auto;\n")
-    sb.append("    aspect-ratio: 291 / 204;\n")
-    sb.append("    display: grid;\n")
-    sb.append("    grid-template-columns: 1fr 3mm 1fr;\n")
-    sb.append("    background: #fff;\n")
-    sb.append("    box-shadow: 0 2px 8px rgba(0,0,0,0.2);\n")
-    sb.append("  }\n")
-    sb.append("  .cut {\n")
-    sb.append("    background: repeating-linear-gradient(to bottom, #999 0 4px, transparent 4px 8px);\n")
-    sb.append("  }\n")
-    sb.append("}\n")
-
-    sb.append(".slice {\n")
-    sb.append("  display: flex;\n")
-    sb.append("  flex-direction: column;\n")
-    sb.append("  border: 1px solid #000;\n")
-    sb.append("  overflow: hidden;\n")
-    sb.append("  background: #fff;\n")
-    sb.append("}\n")
-
-    sb.append(".school { font-weight: bold; font-size: 10pt; text-align: center; padding: 1mm; border-bottom: 1px solid #000; }\n")
-    sb.append(".header { font-size: 7.5pt; line-height: 1.3; padding: 1mm 1.5mm; border-bottom: 1px solid #000; }\n")
-    sb.append(".header div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n")
-    sb.append(".header b { display: inline-block; min-width: 13mm; }\n")
-
-    sb.append(".grid { flex: 1; display: flex; flex-direction: column; }\n")
-    sb.append(".grid-header, .row { display: grid; grid-template-columns: 12mm 1fr 1fr 1fr 1fr; text-align: center; }\n")
-    sb.append(".grid-header { font-size: 8pt; font-weight: bold; border-bottom: 1px solid #000; }\n")
-    sb.append(".grid-header > div, .row > div { padding: 0.4mm 0; border-right: 0.3mm solid #666; }\n")
-    sb.append(".grid-header > div:last-child, .row > div:last-child { border-right: none; }\n")
-    sb.append(".row { font-size: 7.5pt; border-bottom: 0.3mm solid #666; }\n")
-    sb.append(".row .num { font-weight: bold; text-align: right; padding-right: 1mm; }\n")
-    sb.append(".row .bracket { font-family: monospace; font-size: 8pt; }\n")
-    sb.append(".instructions { font-size: 6.5pt; padding: 1mm 1.5mm; border-top: 1px solid #000; line-height: 1.3; }\n")
-
-    sb.append("</style>\n</head><body>\n")
+    // Paints
+    val paintBorder = Paint().apply {
+        color = AndroidColor.BLACK
+        style = Paint.Style.STROKE
+        strokeWidth = 0.8f
+        isAntiAlias = true
+    }
+    val paintThin = Paint().apply {
+        color = AndroidColor.BLACK
+        style = Paint.Style.STROKE
+        strokeWidth = 0.4f
+        isAntiAlias = true
+    }
+    val paintDashed = Paint().apply {
+        color = AndroidColor.parseColor("#888888")
+        style = Paint.Style.STROKE
+        strokeWidth = 0.4f
+        pathEffect = android.graphics.DashPathEffect(floatArrayOf(3f, 3f), 0f)
+        isAntiAlias = true
+    }
+    val paintTextBold = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = 9f
+        isAntiAlias = true
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+    }
+    val paintText = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = 7f
+        isAntiAlias = true
+    }
+    val paintTextSmall = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = 6f
+        isAntiAlias = true
+    }
+    val paintTextBracket = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = 6.5f
+        isAntiAlias = true
+        typeface = android.graphics.Typeface.MONOSPACE
+    }
 
     val chunks = names.chunked(2)
     for (chunk in chunks) {
-        sb.append("<div class=\"page\">\n")
-        // Slice 1
-        appendSlice(sb, chunk.getOrNull(0) ?: "", schoolName, grade, subject, examTitle, term, dateText, cappedCount)
-        // Cut line
-        sb.append("<div class=\"cut\"></div>\n")
-        // Slice 2
-        appendSlice(sb, chunk.getOrNull(1) ?: "", schoolName, grade, subject, examTitle, term, dateText, cappedCount)
-        sb.append("</div>\n")
+        val pageInfo = PdfDocument.PageInfo.Builder(
+            pageWidth.toInt(),
+            pageHeight.toInt(),
+            pdf.pages.size + 1
+        ).create()
+        val page = pdf.startPage(pageInfo)
+        val canvas = page.canvas
+
+        // Left slice
+        drawSlice(
+            canvas = canvas,
+            originX = margin,
+            originY = margin,
+            sliceWidth = sliceWidth,
+            sliceHeight = sliceHeight,
+            studentName = chunk.getOrNull(0) ?: "",
+            schoolName = schoolName,
+            grade = grade,
+            subject = subject,
+            examTitle = examTitle,
+            term = term,
+            dateText = dateText,
+            questionCount = cappedCount,
+            paintBorder = paintBorder,
+            paintThin = paintThin,
+            paintTextBold = paintTextBold,
+            paintText = paintText,
+            paintTextSmall = paintTextSmall,
+            paintTextBracket = paintTextBracket
+        )
+
+        // Cut line (dashed vertical) between slices
+        val cutX = margin + sliceWidth + cutGap / 2f
+        canvas.drawLine(cutX, margin, cutX, margin + sliceHeight, paintDashed)
+
+        // Right slice
+        drawSlice(
+            canvas = canvas,
+            originX = margin + sliceWidth + cutGap,
+            originY = margin,
+            sliceWidth = sliceWidth,
+            sliceHeight = sliceHeight,
+            studentName = chunk.getOrNull(1) ?: "",
+            schoolName = schoolName,
+            grade = grade,
+            subject = subject,
+            examTitle = examTitle,
+            term = term,
+            dateText = dateText,
+            questionCount = cappedCount,
+            paintBorder = paintBorder,
+            paintThin = paintThin,
+            paintTextBold = paintTextBold,
+            paintText = paintText,
+            paintTextSmall = paintTextSmall,
+            paintTextBracket = paintTextBracket
+        )
+
+        pdf.finishPage(page)
     }
 
-    sb.append("</body></html>\n")
-    return sb.toString()
+    return try {
+        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        if (!dir.exists()) dir.mkdirs()
+        val safeBase = filenameBase.replace(Regex("[^A-Za-z0-9_\\-]"), "_")
+        val file = File(dir, "${safeBase}_${System.currentTimeMillis()}.pdf")
+        FileOutputStream(file).use { out -> pdf.writeTo(out) }
+        pdf.close()
+        file.absolutePath
+    } catch (e: Exception) {
+        pdf.close()
+        null
+    }
 }
 
-private fun appendSlice(
-    sb: StringBuilder,
+private fun drawSlice(
+    canvas: Canvas,
+    originX: Float,
+    originY: Float,
+    sliceWidth: Float,
+    sliceHeight: Float,
     studentName: String,
     schoolName: String,
     grade: String,
@@ -471,45 +529,141 @@ private fun appendSlice(
     examTitle: String,
     term: String,
     dateText: String,
-    questionCount: Int
+    questionCount: Int,
+    paintBorder: Paint,
+    paintThin: Paint,
+    paintTextBold: Paint,
+    paintText: Paint,
+    paintTextSmall: Paint,
+    paintTextBracket: Paint
 ) {
-    if (studentName.isBlank() && schoolName.isBlank() && grade.isBlank() && subject.isBlank()) {
-        // Empty filler
-        sb.append("<div class=\"slice\" style=\"border-style:dashed; color:#aaa; font-size:8pt; padding:2mm;\">(empty)</div>\n")
-        return
-    }
-    sb.append("<div class=\"slice\">\n")
-    sb.append("<div class=\"school\">").append(htmlEscape(schoolName.ifBlank { "&nbsp;" })).append("</div>\n")
-    sb.append("<div class=\"header\">\n")
-    sb.append("<div><b>NAME:</b> ").append(htmlEscape(studentName.ifBlank { "_____________________" })).append("</div>\n")
-    sb.append("<div><b>GRADE:</b> ").append(htmlEscape(grade.ifBlank { "-" })).append("</div>\n")
-    sb.append("<div><b>SUBJ:</b> ").append(htmlEscape(subject.ifBlank { "-" })).append("</div>\n")
-    sb.append("<div><b>EXAM:</b> ").append(htmlEscape(examTitle.ifBlank { "-" })).append("</div>\n")
-    sb.append("<div><b>TERM:</b> ").append(htmlEscape(term.ifBlank { "-" })).append("</div>\n")
-    sb.append("<div><b>DATE:</b> ").append(htmlEscape(dateText.ifBlank { "-" })).append("</div>\n")
-    sb.append("</div>\n")
+    // Outer border
+    canvas.drawRect(originX, originY, originX + sliceWidth, originY + sliceHeight, paintBorder)
 
-    sb.append("<div class=\"grid\">\n")
-    sb.append("<div class=\"grid-header\">")
-    sb.append("<div>NO</div><div>A</div><div>B</div><div>C</div><div>D</div>")
-    sb.append("</div>\n")
+    // School name
+    var y = originY + 14f
+    val schoolPaint = Paint(paintTextBold).apply { textSize = 10f }
+    val schoolText = if (schoolName.isBlank()) "" else schoolName
+    if (schoolText.isNotBlank()) {
+        val sw = schoolPaint.measureText(schoolText)
+        canvas.drawText(schoolText, originX + (sliceWidth - sw) / 2f, y, schoolPaint)
+    }
+    y += 4f
+    canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
+    y += 10f
+
+    // Header lines
+    val labelX = originX + 5f
+    val valueX = originX + 55f
+    val nameValue = if (studentName.isBlank()) "_____________________" else studentName
+    canvas.drawText("NAME:", labelX, y, paintText); canvas.drawText(nameValue, valueX, y, paintText)
+    y += 9f
+    canvas.drawText("GRADE:", labelX, y, paintText); canvas.drawText(if (grade.isBlank()) "-" else grade, valueX, y, paintText)
+    y += 9f
+    canvas.drawText("SUBJ:", labelX, y, paintText); canvas.drawText(if (subject.isBlank()) "-" else subject, valueX, y, paintText)
+    y += 9f
+    canvas.drawText("EXAM:", labelX, y, paintText); canvas.drawText(if (examTitle.isBlank()) "-" else examTitle, valueX, y, paintText)
+    y += 9f
+    canvas.drawText("TERM:", labelX, y, paintText); canvas.drawText(if (term.isBlank()) "-" else term, valueX, y, paintText)
+    y += 9f
+    canvas.drawText("DATE:", labelX, y, paintText); canvas.drawText(if (dateText.isBlank()) "-" else dateText, valueX, y, paintText)
+    y += 5f
+
+    // Divider below header
+    canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
+    y += 1f
+
+    // Grid header row
+    val noWidth = 26f
+    val bracketWidth = (sliceWidth - noWidth) / 4f
+    val gridHeaderTop = y
+    val gridHeaderHeight = 11f
+    canvas.drawLine(originX + noWidth, gridHeaderTop, originX + noWidth, gridHeaderTop + gridHeaderHeight, paintThin)
+    for (i in 1..3) {
+        val x = originX + noWidth + bracketWidth * i
+        canvas.drawLine(x, gridHeaderTop, x, gridHeaderTop + gridHeaderHeight, paintThin)
+    }
+    val hdrCenterY = gridHeaderTop + 8f
+    drawCenteredText(canvas, "NO", originX, originX + noWidth, hdrCenterY, paintTextBold)
+    val letters = listOf("A", "B", "C", "D")
+    for (i in 0..3) {
+        val xStart = originX + noWidth + bracketWidth * i
+        drawCenteredText(canvas, letters[i], xStart, xStart + bracketWidth, hdrCenterY, paintTextBold)
+    }
+    val gridHeaderBottom = gridHeaderTop + gridHeaderHeight
+    canvas.drawLine(originX, gridHeaderBottom, originX + sliceWidth, gridHeaderBottom, paintThin)
+
+    // Instructions reserve at bottom: ~24pt
+    val instructionsHeight = 24f
+    val gridBottomLimit = originY + sliceHeight - instructionsHeight - 2f
+    val gridTop = gridHeaderBottom
+    val totalGridHeight = gridBottomLimit - gridTop
+    val rowHeight = totalGridHeight / questionCount.toFloat()
+
+    // Rows
     for (q in 1..questionCount) {
-        sb.append("<div class=\"row\">")
-        sb.append("<div class=\"num\">").append(q).append("</div>")
-        sb.append("<div class=\"bracket\">[&nbsp;]</div>")
-        sb.append("<div class=\"bracket\">[&nbsp;]</div>")
-        sb.append("<div class=\"bracket\">[&nbsp;]</div>")
-        sb.append("<div class=\"bracket\">[&nbsp;]</div>")
-        sb.append("</div>\n")
-    }
-    sb.append("</div>\n")
+        val rowTop = gridTop + rowHeight * (q - 1)
+        val rowBottom = rowTop + rowHeight
+        val baseline = rowTop + rowHeight * 0.72f
 
-    sb.append("<div class=\"instructions\">Write the letter A, B, C, or D inside the bracket of your choice. Use a dark pen. Do not scribble or cross out.</div>\n")
-    sb.append("</div>\n")
+        // number
+        val numText = q.toString()
+        val numWidth = paintTextBold.measureText(numText)
+        canvas.drawText(numText, originX + noWidth - 4f - numWidth, baseline, paintTextBold)
+
+        // brackets
+        for (i in 0..3) {
+            val xStart = originX + noWidth + bracketWidth * i
+            val xCenter = xStart + bracketWidth / 2f
+            val bracketText = "[   ]"
+            val bw = paintTextBracket.measureText(bracketText)
+            canvas.drawText(bracketText, xCenter - bw / 2f, baseline, paintTextBracket)
+        }
+
+        // horizontal row divider
+        canvas.drawLine(originX, rowBottom, originX + sliceWidth, rowBottom, paintThin)
+    }
+
+    // Vertical column dividers (full grid height)
+    canvas.drawLine(originX + noWidth, gridTop, originX + noWidth, gridBottomLimit, paintThin)
+    for (i in 1..3) {
+        val x = originX + noWidth + bracketWidth * i
+        canvas.drawLine(x, gridTop, x, gridBottomLimit, paintThin)
+    }
+
+    // Instructions
+    val instructionsTop = originY + sliceHeight - instructionsHeight
+    canvas.drawLine(originX, instructionsTop, originX + sliceWidth, instructionsTop, paintThin)
+    val insY = instructionsTop + 9f
+    canvas.drawText("Write A/B/C/D inside the bracket of your choice.", originX + 5f, insY, paintTextSmall)
+    canvas.drawText("Use a dark pen. Do not scribble or cross out.", originX + 5f, insY + 8f, paintTextSmall)
 }
 
-fun htmlEscape(s: String): String =
-    s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+private fun drawCenteredText(canvas: Canvas, text: String, left: Float, right: Float, baselineY: Float, paint: Paint) {
+    val w = paint.measureText(text)
+    val centerX = (left + right) / 2f
+    canvas.drawText(text, centerX - w / 2f, baselineY, paint)
+}
+
+// Renders page 1 of a PDF to a Bitmap for preview
+fun renderPdfFirstPage(pdfPath: String): Bitmap? {
+    return try {
+        val file = File(pdfPath)
+        if (!file.exists()) return null
+        val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        val renderer = PdfRenderer(pfd)
+        if (renderer.pageCount <= 0) { renderer.close(); pfd.close(); return null }
+        val page = renderer.openPage(0)
+        // Render at 2x for crisp preview
+        val bmp = Bitmap.createBitmap(page.width * 2, page.height * 2, Bitmap.Config.ARGB_8888)
+        bmp.eraseColor(AndroidColor.WHITE)
+        page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+        page.close()
+        renderer.close()
+        pfd.close()
+        bmp
+    } catch (e: Exception) { null }
+}
 
 // ===== AI FUNCTIONS =====
 private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
@@ -537,9 +691,6 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
                   NAME: <student name>
                   GRADE: <grade>
                   SUBJ: <subject>
-                  EXAM: <exam>
-                  TERM: <term>
-                  DATE: <date>
 
                 If that block exists, output it FIRST exactly:
 
@@ -549,7 +700,7 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
                 SUBJ: <subject as printed>
                 ---SHEET---
 
-                If there is NO printed header block, but there IS a
+                If there is NO printed header block but there IS a
                 handwritten name on the sheet (usually at the top), write
                 it after NAME: so the app can still identify the student:
 
@@ -566,55 +717,44 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
                 STEP 2 — Transcribe the answer section below the header.
                 Preserve whatever format the student used.
 
-                FORMAT A — Printed grid with brackets.
-                The page has a table with columns NO | A | B | C | D and
-                bracket cells like [ ] under each letter. Output each row
-                exactly as it appears:
+                FORMAT A — Printed grid with brackets:
                   1 | [ ] [B] [ ] [ ]
                   2 | [ ] [ ] [C] [ ]
                   3 | [A] [ ] [ ] [ ]
                 Rules:
-                  - The student writes exactly ONE letter inside one
-                    bracket per row.
-                  - If two brackets contain letters, take the LEFTMOST
-                    one.
+                  - Student writes exactly ONE letter in one bracket per row.
+                  - If two brackets have letters, take the LEFTMOST one.
                   - If a bracket has a mark but the letter is unreadable,
-                    print the column header letter (A/B/C/D) inside that
-                    bracket.
-                  - If a row has no letters in any bracket, keep all
-                    four brackets empty: [ ] [ ] [ ] [ ]
+                    print the column header letter inside that bracket.
+                  - If a row has no letters, keep all four empty: [ ] [ ] [ ] [ ]
                   - Preserve row order.
 
-                FORMAT B — Plain handwritten list.
-                The page shows numbers and letters without brackets,
-                like "1B  2C  3B  4A" possibly in two columns. Output:
+                FORMAT B — Plain handwritten list:
+                  1B  2C  3B  4A
+                Output:
                   1 | B
                   2 | C
                   3 | B
                 Rules:
                   - Only the letter the student wrote. No added brackets.
-                  - If a number has no letter next to it, output it blank:
-                    14 |
+                  - If a number has no letter, output it blank: 14 |
                   - Preserve number order.
 
-                FORMAT C — Bubble sheet.
-                The page shows a bubble answer sheet with filled ovals.
-                Output the letter corresponding to the filled oval:
+                FORMAT C — Bubble sheet:
+                Output the letter of the filled oval:
                   1 | B
                   2 | C
                 Unfilled rows = blank.
 
-                FORMAT D — Any other layout.
-                Tick marks in boxes, letters in a custom column,
-                handwriting in a form, anything else. Infer the student's
-                answer per question number and output:
+                FORMAT D — Any other layout:
+                Tick marks, letters in a custom column, anything else.
+                Infer the student's answer per question number and output:
                   <number> | <letter>
-                Do not add brackets unless the original page has them.
+                Do not add brackets unless the page has brackets.
 
                 STEP 3 — Output everything below the ---SHEET--- line in
-                the format that matches what is actually on the page.
-                Never invent brackets. Never invent answers.
-                Never summarise.
+                the format that matches what is on the page.
+                Never invent brackets. Never invent answers. Never summarise.
             """.trimIndent()
 
             val content = JSONArray()
@@ -1107,12 +1247,11 @@ fun WaveUnitsApp() {
         mutableStateOf(SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date()))
     }
     var genQuestionCount by remember { mutableStateOf("50") }
-    var genPreviewHtml by remember { mutableStateOf("") }
-    var lastGeneratedFilePath by remember { mutableStateOf("") }
+    var lastGeneratedPdfPath by remember { mutableStateOf("") }
+    var pdfPreviewBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
     var manualStudentName by remember { mutableStateOf("") }
     var printableReportText by remember { mutableStateOf("") }
-    var generatedAnswerSheetText by remember { mutableStateOf("") }
     var previousTopicPerformance by remember { mutableStateOf<List<ClassTopicPerformance>>(emptyList()) }
     var isExtracting by remember { mutableStateOf(false) }
     var collectedStudentAnswerSheets by remember { mutableStateOf<List<StudentAnswerSheetData>>(emptyList()) }
@@ -1503,15 +1642,6 @@ fun WaveUnitsApp() {
         }
     }
 
-    fun saveHtmlToDownloads(html: String, filenameBase: String): String {
-        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        if (!dir.exists()) dir.mkdirs()
-        val safeBase = filenameBase.replace(Regex("[^A-Za-z0-9_\\-]"), "_")
-        val file = File(dir, "${safeBase}_${System.currentTimeMillis()}.html")
-        FileWriter(file).use { it.write(html) }
-        return file.absolutePath
-    }
-
     fun saveReportToDownloads(text: String) {
         try {
             val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
@@ -1524,7 +1654,7 @@ fun WaveUnitsApp() {
         }
     }
 
-    fun shareFile(path: String) {
+    fun shareFile(path: String, mime: String) {
         try {
             val file = File(path)
             if (!file.exists()) {
@@ -1536,7 +1666,7 @@ fun WaveUnitsApp() {
                 file
             )
             val i = Intent(Intent.ACTION_SEND).apply {
-                type = "text/html"
+                type = mime
                 putExtra(Intent.EXTRA_STREAM, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
@@ -3211,7 +3341,7 @@ fun WaveUnitsApp() {
                                             Button(onClick = { sectionState = sectionState.copy(isAnswerSheetGeneratorOpen = true) },
                                                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                            ) { Text("Generate Answer Sheet (A4)") }
+                                            ) { Text("Generate Answer Sheet (PDF)") }
                                         }
                                         item {
                                             Button(onClick = { sectionState = sectionState.copy(isQuestionPaperOpen = true) },
@@ -3255,8 +3385,8 @@ fun WaveUnitsApp() {
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
                                             ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
-                                            Text("Generate Answer Sheets (A4)", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                            Text("2 sheets per A4 landscape page. One cut down the middle.", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                            Text("Generate Answer Sheets (PDF)", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                            Text("A4 landscape. 2 sheets per page, 1 cut down the middle.", color = Color(0xFF94a3b8), fontSize = 11.sp)
                                             Spacer(modifier = Modifier.height(12.dp))
 
                                             OutlinedTextField(value = genSchool, onValueChange = { genSchool = it },
@@ -3329,37 +3459,9 @@ fun WaveUnitsApp() {
                                             Button(
                                                 onClick = {
                                                     val q = genQuestionCount.toIntOrNull() ?: 50
-                                                    val html = buildAnswerSheetHtml(
-                                                        schoolName = genSchool,
-                                                        grade = genGrade.ifBlank { p?.grade ?: "" },
-                                                        subject = genSubject.ifBlank { p?.subjectKey ?: "" },
-                                                        examTitle = genExamTitle.ifBlank { currentProjectTitle },
-                                                        term = genTerm,
-                                                        dateText = genDate,
-                                                        questionCount = q,
-                                                        studentNames = emptyList()
-                                                    )
-                                                    genPreviewHtml = html
                                                     val path = try {
-                                                        saveHtmlToDownloads(html, "WaveUnits_AnswerSheet_Blank")
-                                                    } catch (e: Exception) {
-                                                        Toast.makeText(context, "Save error: ${e.message}", Toast.LENGTH_LONG).show()
-                                                        ""
-                                                    }
-                                                    lastGeneratedFilePath = path
-                                                    if (path.isNotBlank()) Toast.makeText(context, "Saved: $path", Toast.LENGTH_LONG).show()
-                                                },
-                                                modifier = Modifier.fillMaxWidth(),
-                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                            ) { Text("Generate Blank Template (1 sheet)") }
-                                            Spacer(modifier = Modifier.height(8.dp))
-                                            Button(
-                                                onClick = {
-                                                    if (rosterNames.isEmpty()) {
-                                                        Toast.makeText(context, "Pick a roster or paste names first", Toast.LENGTH_SHORT).show()
-                                                    } else {
-                                                        val q = genQuestionCount.toIntOrNull() ?: 50
-                                                        val html = buildAnswerSheetHtml(
+                                                        buildAnswerSheetPdf(
+                                                            context = context,
                                                             schoolName = genSchool,
                                                             grade = genGrade.ifBlank { p?.grade ?: "" },
                                                             subject = genSubject.ifBlank { p?.subjectKey ?: "" },
@@ -3367,63 +3469,81 @@ fun WaveUnitsApp() {
                                                             term = genTerm,
                                                             dateText = genDate,
                                                             questionCount = q,
-                                                            studentNames = rosterNames
+                                                            studentNames = emptyList(),
+                                                            filenameBase = "WaveUnits_AnswerSheet_Blank"
                                                         )
-                                                        genPreviewHtml = html
+                                                    } catch (e: Exception) {
+                                                        Toast.makeText(context, "PDF error: ${e.message}", Toast.LENGTH_LONG).show()
+                                                        null
+                                                    }
+                                                    if (path != null) {
+                                                        lastGeneratedPdfPath = path
+                                                        pdfPreviewBitmap = renderPdfFirstPage(path)
+                                                        Toast.makeText(context, "Saved: $path", Toast.LENGTH_LONG).show()
+                                                    }
+                                                },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                                            ) { Text("Generate Blank PDF (1 sheet)") }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Button(
+                                                onClick = {
+                                                    if (rosterNames.isEmpty()) {
+                                                        Toast.makeText(context, "Pick a roster or paste names first", Toast.LENGTH_SHORT).show()
+                                                    } else {
+                                                        val q = genQuestionCount.toIntOrNull() ?: 50
                                                         val baseName = "WaveUnits_AnswerSheets_${genGrade.ifBlank { p?.grade ?: "" }}_${genSubject.ifBlank { p?.subjectKey ?: "" }}"
                                                         val path = try {
-                                                            saveHtmlToDownloads(html, baseName)
+                                                            buildAnswerSheetPdf(
+                                                                context = context,
+                                                                schoolName = genSchool,
+                                                                grade = genGrade.ifBlank { p?.grade ?: "" },
+                                                                subject = genSubject.ifBlank { p?.subjectKey ?: "" },
+                                                                examTitle = genExamTitle.ifBlank { currentProjectTitle },
+                                                                term = genTerm,
+                                                                dateText = genDate,
+                                                                questionCount = q,
+                                                                studentNames = rosterNames,
+                                                                filenameBase = baseName
+                                                            )
                                                         } catch (e: Exception) {
-                                                            Toast.makeText(context, "Save error: ${e.message}", Toast.LENGTH_LONG).show()
-                                                            ""
+                                                            Toast.makeText(context, "PDF error: ${e.message}", Toast.LENGTH_LONG).show()
+                                                            null
                                                         }
-                                                        lastGeneratedFilePath = path
-                                                        if (path.isNotBlank()) Toast.makeText(context, "Saved ${rosterNames.size} sheets to: $path", Toast.LENGTH_LONG).show()
+                                                        if (path != null) {
+                                                            lastGeneratedPdfPath = path
+                                                            pdfPreviewBitmap = renderPdfFirstPage(path)
+                                                            val pages = (rosterNames.size + 1) / 2
+                                                            Toast.makeText(context, "Saved ${rosterNames.size} sheets ($pages pages) to: $path", Toast.LENGTH_LONG).show()
+                                                        }
                                                     }
                                                 },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                            ) { Text("Generate for All in Roster (${rosterNames.size})") }
+                                            ) { Text("Generate PDF for All in Roster (${rosterNames.size})") }
                                             Spacer(modifier = Modifier.height(10.dp))
-                                            if (lastGeneratedFilePath.isNotBlank()) {
+                                            if (lastGeneratedPdfPath.isNotBlank()) {
                                                 Button(
-                                                    onClick = { shareFile(lastGeneratedFilePath) },
+                                                    onClick = { shareFile(lastGeneratedPdfPath, "application/pdf") },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                                ) { Text("Open / Share Generated File") }
+                                                ) { Text("Open / Share PDF") }
                                                 Spacer(modifier = Modifier.height(4.dp))
-                                                Text("File: $lastGeneratedFilePath", color = Color(0xFF94a3b8), fontSize = 10.sp)
+                                                Text("File: $lastGeneratedPdfPath", color = Color(0xFF94a3b8), fontSize = 10.sp)
                                                 Spacer(modifier = Modifier.height(10.dp))
                                             }
-                                            if (genPreviewHtml.isNotBlank()) {
-                                                Text("Preview (first sheet):", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 13.sp)
-                                                Text("Pinch to zoom. Landscape A4, 2 sheets per page.", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                            pdfPreviewBitmap?.let { bmp ->
+                                                Text("Preview (page 1):", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 13.sp)
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 Card(
-                                                    modifier = Modifier.fillMaxWidth().height(600.dp),
+                                                    modifier = Modifier.fillMaxWidth(),
                                                     colors = CardDefaults.cardColors(containerColor = Color.White)
                                                 ) {
-                                                    AndroidView(
-                                                        factory = { ctx ->
-                                                            WebView(ctx).apply {
-                                                                webViewClient = WebViewClient()
-                                                                settings.javaScriptEnabled = false
-                                                                settings.loadWithOverviewMode = true
-                                                                settings.useWideViewPort = true
-                                                                settings.builtInZoomControls = true
-                                                                settings.displayZoomControls = false
-                                                            }
-                                                        },
-                                                        update = { webView ->
-                                                            webView.loadDataWithBaseURL(
-                                                                null,
-                                                                genPreviewHtml,
-                                                                "text/html",
-                                                                "utf-8",
-                                                                null
-                                                            )
-                                                        },
-                                                        modifier = Modifier.fillMaxSize()
+                                                    Image(
+                                                        bitmap = bmp.asImageBitmap(),
+                                                        contentDescription = "PDF preview",
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        contentScale = ContentScale.FillWidth
                                                     )
                                                 }
                                             }
