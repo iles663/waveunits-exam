@@ -370,9 +370,13 @@ fun generatePrintableMarkedSheets(markedSheets: List<MarkedAnswerSheetData>): St
 }
 
 // ===== PDF ANSWER SHEET GENERATOR =====
-// A4 landscape, 2 answer sheets per page, one vertical cut in the middle.
-// Each slice: ~144mm wide x 204mm tall, with a 4mm internal gutter between two question columns.
-// Fixed bracket size 15.5mm x 6.5mm. No shrinking, no stretching.
+// A4 landscape = 297mm x 210mm. 2 slices per page, one 4mm cut gap between them.
+// Every dimension below is in millimetres. The mm() helper converts to points for PDF.
+// PDF page coordinates are in points (1pt = 1/72 inch = 0.3528mm).
+
+private const val PT_PER_MM = 2.83465f
+private fun mm(v: Float): Float = v * PT_PER_MM
+
 fun buildAnswerSheetPdf(
     context: Context,
     schoolName: String,
@@ -391,60 +395,41 @@ fun buildAnswerSheetPdf(
     val rightCount = if (cappedCount <= 25) 0 else cappedCount - 25
 
     val pdf = PdfDocument()
-    val pageWidth = 842f
-    val pageHeight = 595f
-    val margin = 8.5f
-    val cutGap = 8.5f
-    val sliceWidth = (pageWidth - 2 * margin - cutGap) / 2f
-    val sliceHeight = pageHeight - 2 * margin
+
+    // A4 landscape in points: 297mm x 210mm
+    val pageWidthPt = mm(297f)
+    val pageHeightPt = mm(210f)
+    val marginPt = mm(3f)     // 3mm print margin
+    val cutGapPt = mm(4f)     // 4mm cut gap between slices
+
+    val sliceWidthPt = (pageWidthPt - 2f * marginPt - cutGapPt) / 2f
+    val sliceHeightPt = pageHeightPt - 2f * marginPt
 
     val paintBorder = Paint().apply {
         color = AndroidColor.BLACK
         style = Paint.Style.STROKE
-        strokeWidth = 0.8f
+        strokeWidth = 0.6f
         isAntiAlias = true
     }
     val paintThin = Paint().apply {
         color = AndroidColor.BLACK
         style = Paint.Style.STROKE
-        strokeWidth = 0.4f
+        strokeWidth = 0.3f
         isAntiAlias = true
     }
     val paintDashed = Paint().apply {
         color = AndroidColor.parseColor("#888888")
         style = Paint.Style.STROKE
-        strokeWidth = 0.4f
+        strokeWidth = 0.5f
         pathEffect = android.graphics.DashPathEffect(floatArrayOf(3f, 3f), 0f)
         isAntiAlias = true
-    }
-    val paintTextBold = Paint().apply {
-        color = AndroidColor.BLACK
-        textSize = 9f
-        isAntiAlias = true
-        typeface = Typeface.DEFAULT_BOLD
-    }
-    val paintText = Paint().apply {
-        color = AndroidColor.BLACK
-        textSize = 7f
-        isAntiAlias = true
-    }
-    val paintTextSmall = Paint().apply {
-        color = AndroidColor.BLACK
-        textSize = 6f
-        isAntiAlias = true
-    }
-    val paintTextBracket = Paint().apply {
-        color = AndroidColor.BLACK
-        textSize = 6.5f
-        isAntiAlias = true
-        typeface = Typeface.MONOSPACE
     }
 
     val chunks = names.chunked(2)
     for (chunk in chunks) {
         val pageInfo = PdfDocument.PageInfo.Builder(
-            pageWidth.toInt(),
-            pageHeight.toInt(),
+            pageWidthPt.toInt(),
+            pageHeightPt.toInt(),
             pdf.pages.size + 1
         ).create()
         val page = pdf.startPage(pageInfo)
@@ -452,10 +437,10 @@ fun buildAnswerSheetPdf(
 
         drawSlice(
             canvas = canvas,
-            originX = margin,
-            originY = margin,
-            sliceWidth = sliceWidth,
-            sliceHeight = sliceHeight,
+            originX = marginPt,
+            originY = marginPt,
+            sliceWidth = sliceWidthPt,
+            sliceHeight = sliceHeightPt,
             studentName = chunk.getOrNull(0) ?: "",
             schoolName = schoolName,
             grade = grade,
@@ -466,22 +451,18 @@ fun buildAnswerSheetPdf(
             leftCount = leftCount,
             rightCount = rightCount,
             paintBorder = paintBorder,
-            paintThin = paintThin,
-            paintTextBold = paintTextBold,
-            paintText = paintText,
-            paintTextSmall = paintTextSmall,
-            paintTextBracket = paintTextBracket
+            paintThin = paintThin
         )
 
-        val cutX = margin + sliceWidth + cutGap / 2f
-        canvas.drawLine(cutX, margin, cutX, margin + sliceHeight, paintDashed)
+        val cutX = marginPt + sliceWidthPt + cutGapPt / 2f
+        canvas.drawLine(cutX, marginPt, cutX, marginPt + sliceHeightPt, paintDashed)
 
         drawSlice(
             canvas = canvas,
-            originX = margin + sliceWidth + cutGap,
-            originY = margin,
-            sliceWidth = sliceWidth,
-            sliceHeight = sliceHeight,
+            originX = marginPt + sliceWidthPt + cutGapPt,
+            originY = marginPt,
+            sliceWidth = sliceWidthPt,
+            sliceHeight = sliceHeightPt,
             studentName = chunk.getOrNull(1) ?: "",
             schoolName = schoolName,
             grade = grade,
@@ -492,11 +473,7 @@ fun buildAnswerSheetPdf(
             leftCount = leftCount,
             rightCount = rightCount,
             paintBorder = paintBorder,
-            paintThin = paintThin,
-            paintTextBold = paintTextBold,
-            paintText = paintText,
-            paintTextSmall = paintTextSmall,
-            paintTextBracket = paintTextBracket
+            paintThin = paintThin
         )
 
         pdf.finishPage(page)
@@ -532,162 +509,196 @@ private fun drawSlice(
     leftCount: Int,
     rightCount: Int,
     paintBorder: Paint,
-    paintThin: Paint,
-    paintTextBold: Paint,
-    paintText: Paint,
-    paintTextSmall: Paint,
-    paintTextBracket: Paint
+    paintThin: Paint
 ) {
+    // Outer border
     canvas.drawRect(originX, originY, originX + sliceWidth, originY + sliceHeight, paintBorder)
 
-    // Slice padding
-    val padX = 6f
+    // --- All measurements in millimetres, converted via mm() ---
+    val topPad = mm(1f)
+    val schoolBandH = mm(5f)
+    val dividerH = mm(0.5f)
+    val nameBandH1Line = mm(16f)
+    val nameBandH2Line = mm(32f)
+    val detailsH = mm(5f)
+    val gridHeaderH = mm(5f)
+    val rowH = mm(6.5f)
+    val instrH = mm(5f)
+    val bottomPad = mm(1f)
+    val padX = mm(6f)
 
-    // --- School band ---
-    var y = originY + 1f
-    y += 5f
-    val schoolPaint = Paint(paintTextBold).apply { textSize = 12f }
-    val schoolText = schoolName.ifBlank { "" }
-    if (schoolText.isNotBlank()) {
-        val sw = schoolPaint.measureText(schoolText)
-        canvas.drawText(schoolText, originX + (sliceWidth - sw) / 2f, y, schoolPaint)
-    }
-    y += 1f
-    canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
-
-    // --- NAME band ---
-    val nameFill = Paint().apply {
+    // --- Paints ---
+    val schoolPaint = Paint().apply {
         color = AndroidColor.BLACK
-        textSize = 22f
+        textSize = mm(3.5f) // ~10pt
+        isAntiAlias = true
+        typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
+    }
+    val nameFillPaint = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = mm(7.8f) // ~22pt at 3.53pt/mm
         isAntiAlias = true
         typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
         style = Paint.Style.FILL
     }
-    val nameStroke = Paint().apply {
+    val nameStrokePaint = Paint().apply {
         color = AndroidColor.BLACK
-        textSize = 22f
+        textSize = mm(7.8f)
         isAntiAlias = true
         typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
         style = Paint.Style.STROKE
-        strokeWidth = 0.6f
+        strokeWidth = mm(0.25f)
     }
+    val detailPaint = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = mm(2.5f) // ~7pt
+        isAntiAlias = true
+    }
+    val gridHeaderPaint = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = mm(2.8f)
+        isAntiAlias = true
+        typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
+    }
+    val rowNumPaint = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = mm(2.6f)
+        isAntiAlias = true
+        typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
+    }
+    val bracketPaint = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = mm(2.6f)
+        isAntiAlias = true
+        typeface = Typeface.MONOSPACE
+    }
+    val instrPaint = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = mm(2.2f)
+        isAntiAlias = true
+    }
+
+    var y = originY + topPad
+
+    // --- School band ---
+    if (schoolName.isNotBlank()) {
+        val baseline = y + schoolBandH * 0.72f
+        val w = schoolPaint.measureText(schoolName)
+        canvas.drawText(schoolName, originX + (sliceWidth - w) / 2f, baseline, schoolPaint)
+    }
+    y += schoolBandH
+    canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
+    y += dividerH
+
+    // --- NAME band (with wrapping to 2 lines if needed) ---
     val nameLabel = "NAME:  "
     val nameValue = if (studentName.isBlank()) "________________________" else studentName.uppercase()
 
-    // Available width for the name text (after label), minus padding on both sides
-    val availWidth = sliceWidth - padX * 2f
-    // 1.15x stretch means effective text width is 1.15 * measureText
-    val labelWidthPx = nameFill.measureText(nameLabel) * 1.15f
-    val availForValue = availWidth - labelWidthPx
+    val availWidth = sliceWidth - 2f * padX
+    val labelWidth = nameFillPaint.measureText(nameLabel) * 1.15f
+    val availForValue = availWidth - labelWidth
 
-    // Simple word-wrap on the name value so it fits the available width
-    val nameLines = wrapNameToWidth(nameValue, availForValue, nameFill, 1.15f)
+    val nameLines = wrapNameToWidth(nameValue, availForValue, nameFillPaint, 1.15f)
+    val linesUsed = nameLines.size.coerceAtMost(2)
+    val nameBandH = if (linesUsed <= 1) nameBandH1Line else nameBandH2Line
 
     val nameBandTop = y
-    val linesCount = nameLines.size.coerceAtMost(2)
-    val nameBandHeight = if (linesCount <= 1) 16f else 24f
-    val nameBandBottom = nameBandTop + nameBandHeight
+    val nameBandBottom = nameBandTop + nameBandH
+    val nameTextSize = nameFillPaint.textSize
+    val lineGap = nameTextSize * 1.15f
+    val firstBaseline = nameBandTop + nameBandH * 0.5f - ((linesUsed - 1) * lineGap) / 2f + nameTextSize * 0.35f
 
-    // Draw each line
-    for (i in 0 until linesCount) {
-        val lineText = nameLines[i]
-        val prefix = if (i == 0) nameLabel else "       " // align continuation under value
-        val fullLine = prefix + lineText
-        val baselineY = nameBandTop + 13f + (i * 10f)
+    for (i in 0 until linesUsed) {
+        val prefix = if (i == 0) nameLabel else "       "
+        val fullLine = prefix + nameLines[i]
+        val baselineY = firstBaseline + i * lineGap
         canvas.save()
         canvas.scale(1.15f, 1.0f, originX + padX, baselineY)
-        canvas.drawText(fullLine, originX + padX, baselineY, nameFill)
-        canvas.drawText(fullLine, originX + padX, baselineY, nameStroke)
+        canvas.drawText(fullLine, originX + padX, baselineY, nameFillPaint)
+        canvas.drawText(fullLine, originX + padX, baselineY, nameStrokePaint)
         canvas.restore()
     }
     canvas.drawLine(originX, nameBandBottom, originX + sliceWidth, nameBandBottom, paintThin)
-    y = nameBandBottom
+    y = nameBandBottom + dividerH
 
     // --- Details line ---
-    y += 4f
-    val detailPaint = Paint(paintText).apply { textSize = 7.5f }
-    val detailLine1 = "GRADE: ${grade.ifBlank { "-" }}   SUBJ: ${subject.ifBlank { "-" }}   EXAM: ${examTitle.ifBlank { "-" }}"
-    canvas.drawText(detailLine1, originX + padX, y, detailPaint)
-    y += 6f
-    val detailLine2 = "TERM: ${term.ifBlank { "-" }}   DATE: ${dateText.ifBlank { "-" }}"
-    canvas.drawText(detailLine2, originX + padX, y, detailPaint)
-    y += 2f
+    val detailsBaseline = y + detailsH * 0.72f
+    val line1 = "GRADE: ${grade.ifBlank { "-" }}   SUBJ: ${subject.ifBlank { "-" }}   EXAM: ${examTitle.ifBlank { "-" }}"
+    canvas.drawText(line1, originX + padX, detailsBaseline, detailPaint)
+    y += detailsH
     canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
+    y += dividerH
 
-    // --- Grid area ---
+    // --- Grid ---
     val gridHeaderTop = y
-    val gridHeaderHeight = 6f
-    val halfGutter = 4f
-    val halfWidth = (sliceWidth - halfGutter) / 2f
-    val noWidth = 8f
-    val bracketWidth = (halfWidth - noWidth) / 4f
+    val gridHeaderBottom = gridHeaderTop + gridHeaderH
 
-    // Column header labels for both halves
+    val gutterW = mm(4f)
+    val halfWidth = (sliceWidth - gutterW) / 2f
+    val noColW = mm(9f)
+    val bracketColW = (halfWidth - noColW) / 4f
+
+    // Header labels
     for (half in 0..1) {
-        val halfStartX = originX + (halfWidth + halfGutter) * half
-        val hdrBaseline = gridHeaderTop + 4.5f
-        drawCenteredText(canvas, "NO", halfStartX, halfStartX + noWidth, hdrBaseline, paintTextBold)
+        val halfStartX = originX + (halfWidth + gutterW) * half
+        val hdrBaseline = gridHeaderTop + gridHeaderH * 0.72f
+        drawCenteredText(canvas, "NO", halfStartX, halfStartX + noColW, hdrBaseline, gridHeaderPaint)
         val letters = listOf("A", "B", "C", "D")
         for (i in 0..3) {
-            val xStart = halfStartX + noWidth + bracketWidth * i
-            drawCenteredText(canvas, letters[i], xStart, xStart + bracketWidth, hdrBaseline, paintTextBold)
+            val xStart = halfStartX + noColW + bracketColW * i
+            drawCenteredText(canvas, letters[i], xStart, xStart + bracketColW, hdrBaseline, gridHeaderPaint)
         }
     }
-    val gridHeaderBottom = gridHeaderTop + gridHeaderHeight
     canvas.drawLine(originX, gridHeaderBottom, originX + sliceWidth, gridHeaderBottom, paintThin)
 
-    // Reserve instructions at bottom
-    val instructionsHeight = 5f
-    val gridBottomLimit = originY + sliceHeight - instructionsHeight - 1f
     val gridTop = gridHeaderBottom
-    val rowHeight = 6.5f  // FIXED
-    val maxRows = if (leftCount > rightCount) leftCount else rightCount
+    // Reserve bottom for instructions + pad
+    val gridBottomLimit = originY + sliceHeight - instrH - bottomPad
 
-    // Divider between the two halves — placed in the gutter
-    val dividerX = originX + halfWidth + halfGutter / 2f
+    // Divider between halves — placed in the gutter
+    val dividerX = originX + halfWidth + gutterW / 2f
     canvas.drawLine(dividerX, gridHeaderTop, dividerX, gridBottomLimit, paintThin)
 
-    // Draw rows
+    // Draw rows for each half
     for (half in 0..1) {
-        val halfStartX = originX + (halfWidth + halfGutter) * half
+        val halfStartX = originX + (halfWidth + gutterW) * half
         val start = if (half == 0) 1 else 26
         val count = if (half == 0) leftCount else rightCount
         for (i in 0 until count) {
             val q = start + i
-            val rowTop = gridTop + rowHeight * i
-            val rowBottom = rowTop + rowHeight
-            val baseline = rowTop + rowHeight * 0.72f
+            val rowTop = gridTop + rowH * i
+            val rowBottom = rowTop + rowH
+            val baseline = rowTop + rowH * 0.70f
 
             val numText = q.toString()
-            val numWidth = paintTextBold.measureText(numText)
-            canvas.drawText(numText, halfStartX + noWidth - 3f - numWidth, baseline, paintTextBold)
+            val numWidth = rowNumPaint.measureText(numText)
+            canvas.drawText(numText, halfStartX + noColW - mm(1.5f) - numWidth, baseline, rowNumPaint)
 
             for (bi in 0..3) {
-                val xStart = halfStartX + noWidth + bracketWidth * bi
-                val xCenter = xStart + bracketWidth / 2f
+                val xStart = halfStartX + noColW + bracketColW * bi
+                val xCenter = xStart + bracketColW / 2f
                 val bracketText = "[   ]"
-                val bw = paintTextBracket.measureText(bracketText)
-                canvas.drawText(bracketText, xCenter - bw / 2f, baseline, paintTextBracket)
+                val bw = bracketPaint.measureText(bracketText)
+                canvas.drawText(bracketText, xCenter - bw / 2f, baseline, bracketPaint)
             }
 
             canvas.drawLine(halfStartX, rowBottom, halfStartX + halfWidth, rowBottom, paintThin)
         }
-        // Column dividers for this half (full grid height)
-        canvas.drawLine(halfStartX + noWidth, gridTop, halfStartX + noWidth, gridBottomLimit, paintThin)
+        // Column dividers
+        canvas.drawLine(halfStartX + noColW, gridTop, halfStartX + noColW, gridBottomLimit, paintThin)
         for (bi in 1..3) {
-            val x = halfStartX + noWidth + bracketWidth * bi
+            val x = halfStartX + noColW + bracketColW * bi
             canvas.drawLine(x, gridTop, x, gridBottomLimit, paintThin)
         }
     }
 
     // Instructions
-    val instructionsTop = originY + sliceHeight - instructionsHeight
-    canvas.drawLine(originX, instructionsTop, originX + sliceWidth, instructionsTop, paintThin)
-    val insY = instructionsTop + 3.5f
-    canvas.drawText("Write A/B/C/D inside the bracket of your choice.", originX + padX, insY, paintTextSmall)
+    val instrTop = originY + sliceHeight - instrH - bottomPad
+    canvas.drawLine(originX, instrTop, originX + sliceWidth, instrTop, paintThin)
+    val instrBaseline = instrTop + instrH * 0.72f
+    canvas.drawText("Write A/B/C/D inside the bracket of your choice.", originX + padX, instrBaseline, instrPaint)
 }
 
-// Simple word-wrap for the NAME line: split by spaces into lines that fit within availWidth
 private fun wrapNameToWidth(text: String, availWidth: Float, paint: Paint, stretchFactor: Float): List<String> {
     if (text.isBlank()) return listOf("")
     val words = text.split(" ")
