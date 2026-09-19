@@ -335,7 +335,7 @@ fun generateTrends(current: List<ClassTopicPerformance>, previous: List<ClassTop
     val trends = mutableListOf<TrendData>()
     for (c in current) {
         val p = previous.find { it.topic == c.topic } ?: continue
-        trends.add(TrendData(c.topic, p.averageScore, c.averageScore, c.averageScore - p.averageScore))
+        trends.add(TrendData(c.topic, c.averageScore, c.averageScore, c.averageScore - p.averageScore))
     }
     return trends
 }
@@ -369,14 +369,11 @@ fun generatePrintableMarkedSheets(markedSheets: List<MarkedAnswerSheetData>): St
     return sb.toString()
 }
 
-// ===== PDF ANSWER SHEET GENERATOR =====
-// A4 landscape = 297mm x 210mm. 2 slices per page, one 4mm cut gap between them.
-// Every dimension below is in millimetres. The mm() helper converts to points for PDF.
-// PDF page coordinates are in points (1pt = 1/72 inch = 0.3528mm).
-
+// ===== PDF HELPERS =====
 private const val PT_PER_MM = 2.83465f
 private fun mm(v: Float): Float = v * PT_PER_MM
 
+// ===== PDF ANSWER SHEET GENERATOR =====
 fun buildAnswerSheetPdf(
     context: Context,
     schoolName: String,
@@ -395,13 +392,10 @@ fun buildAnswerSheetPdf(
     val rightCount = if (cappedCount <= 25) 0 else cappedCount - 25
 
     val pdf = PdfDocument()
-
-    // A4 landscape in points: 297mm x 210mm
     val pageWidthPt = mm(297f)
     val pageHeightPt = mm(210f)
-    val marginPt = mm(3f)     // 3mm print margin
-    val cutGapPt = mm(4f)     // 4mm cut gap between slices
-
+    val marginPt = mm(3f)
+    val cutGapPt = mm(4f)
     val sliceWidthPt = (pageWidthPt - 2f * marginPt - cutGapPt) / 2f
     val sliceHeightPt = pageHeightPt - 2f * marginPt
 
@@ -435,7 +429,7 @@ fun buildAnswerSheetPdf(
         val page = pdf.startPage(pageInfo)
         val canvas = page.canvas
 
-        drawSlice(
+        drawAnswerSheetSlice(
             canvas = canvas,
             originX = marginPt,
             originY = marginPt,
@@ -457,7 +451,7 @@ fun buildAnswerSheetPdf(
         val cutX = marginPt + sliceWidthPt + cutGapPt / 2f
         canvas.drawLine(cutX, marginPt, cutX, marginPt + sliceHeightPt, paintDashed)
 
-        drawSlice(
+        drawAnswerSheetSlice(
             canvas = canvas,
             originX = marginPt + sliceWidthPt + cutGapPt,
             originY = marginPt,
@@ -493,7 +487,7 @@ fun buildAnswerSheetPdf(
     }
 }
 
-private fun drawSlice(
+private fun drawAnswerSheetSlice(
     canvas: Canvas,
     originX: Float,
     originY: Float,
@@ -511,32 +505,29 @@ private fun drawSlice(
     paintBorder: Paint,
     paintThin: Paint
 ) {
-    // Outer border
     canvas.drawRect(originX, originY, originX + sliceWidth, originY + sliceHeight, paintBorder)
 
-    // --- All measurements in millimetres, converted via mm() ---
     val topPad = mm(1f)
     val schoolBandH = mm(5f)
     val dividerH = mm(0.5f)
     val nameBandH1Line = mm(16f)
-    val nameBandH2Line = mm(32f)
+    val nameBandH2Line = mm(18f)   // <- fixed: was 32mm, now 18mm
     val detailsH = mm(5f)
     val gridHeaderH = mm(5f)
-    val rowH = mm(6.5f)
     val instrH = mm(5f)
     val bottomPad = mm(1f)
     val padX = mm(6f)
+    val rowH = mm(6.5f)             // <- fixed: always 6.5mm, never shrinks
 
-    // --- Paints ---
     val schoolPaint = Paint().apply {
         color = AndroidColor.BLACK
-        textSize = mm(3.5f) // ~10pt
+        textSize = mm(3.5f)
         isAntiAlias = true
         typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
     }
     val nameFillPaint = Paint().apply {
         color = AndroidColor.BLACK
-        textSize = mm(7.8f) // ~22pt at 3.53pt/mm
+        textSize = mm(7.8f)
         isAntiAlias = true
         typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
         style = Paint.Style.FILL
@@ -551,7 +542,7 @@ private fun drawSlice(
     }
     val detailPaint = Paint().apply {
         color = AndroidColor.BLACK
-        textSize = mm(2.5f) // ~7pt
+        textSize = mm(2.5f)
         isAntiAlias = true
     }
     val gridHeaderPaint = Paint().apply {
@@ -580,7 +571,6 @@ private fun drawSlice(
 
     var y = originY + topPad
 
-    // --- School band ---
     if (schoolName.isNotBlank()) {
         val baseline = y + schoolBandH * 0.72f
         val w = schoolPaint.measureText(schoolName)
@@ -590,7 +580,6 @@ private fun drawSlice(
     canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
     y += dividerH
 
-    // --- NAME band (with wrapping to 2 lines if needed) ---
     val nameLabel = "NAME:  "
     val nameValue = if (studentName.isBlank()) "________________________" else studentName.uppercase()
 
@@ -605,7 +594,7 @@ private fun drawSlice(
     val nameBandTop = y
     val nameBandBottom = nameBandTop + nameBandH
     val nameTextSize = nameFillPaint.textSize
-    val lineGap = nameTextSize * 1.15f
+    val lineGap = if (linesUsed <= 1) 0f else nameTextSize * 0.95f
     val firstBaseline = nameBandTop + nameBandH * 0.5f - ((linesUsed - 1) * lineGap) / 2f + nameTextSize * 0.35f
 
     for (i in 0 until linesUsed) {
@@ -621,7 +610,6 @@ private fun drawSlice(
     canvas.drawLine(originX, nameBandBottom, originX + sliceWidth, nameBandBottom, paintThin)
     y = nameBandBottom + dividerH
 
-    // --- Details line ---
     val detailsBaseline = y + detailsH * 0.72f
     val line1 = "GRADE: ${grade.ifBlank { "-" }}   SUBJ: ${subject.ifBlank { "-" }}   EXAM: ${examTitle.ifBlank { "-" }}"
     canvas.drawText(line1, originX + padX, detailsBaseline, detailPaint)
@@ -629,7 +617,6 @@ private fun drawSlice(
     canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
     y += dividerH
 
-    // --- Grid ---
     val gridHeaderTop = y
     val gridHeaderBottom = gridHeaderTop + gridHeaderH
 
@@ -638,7 +625,6 @@ private fun drawSlice(
     val noColW = mm(9f)
     val bracketColW = (halfWidth - noColW) / 4f
 
-    // Header labels
     for (half in 0..1) {
         val halfStartX = originX + (halfWidth + gutterW) * half
         val hdrBaseline = gridHeaderTop + gridHeaderH * 0.72f
@@ -652,14 +638,11 @@ private fun drawSlice(
     canvas.drawLine(originX, gridHeaderBottom, originX + sliceWidth, gridHeaderBottom, paintThin)
 
     val gridTop = gridHeaderBottom
-    // Reserve bottom for instructions + pad
     val gridBottomLimit = originY + sliceHeight - instrH - bottomPad
 
-    // Divider between halves — placed in the gutter
     val dividerX = originX + halfWidth + gutterW / 2f
     canvas.drawLine(dividerX, gridHeaderTop, dividerX, gridBottomLimit, paintThin)
 
-    // Draw rows for each half
     for (half in 0..1) {
         val halfStartX = originX + (halfWidth + gutterW) * half
         val start = if (half == 0) 1 else 26
@@ -684,7 +667,6 @@ private fun drawSlice(
 
             canvas.drawLine(halfStartX, rowBottom, halfStartX + halfWidth, rowBottom, paintThin)
         }
-        // Column dividers
         canvas.drawLine(halfStartX + noColW, gridTop, halfStartX + noColW, gridBottomLimit, paintThin)
         for (bi in 1..3) {
             val x = halfStartX + noColW + bracketColW * bi
@@ -692,7 +674,6 @@ private fun drawSlice(
         }
     }
 
-    // Instructions
     val instrTop = originY + sliceHeight - instrH - bottomPad
     canvas.drawLine(originX, instrTop, originX + sliceWidth, instrTop, paintThin)
     val instrBaseline = instrTop + instrH * 0.72f
@@ -725,6 +706,197 @@ private fun drawCenteredText(canvas: Canvas, text: String, left: Float, right: F
     canvas.drawText(text, centerX - w / 2f, baselineY, paint)
 }
 
+// ===== PDF MARKED SHEETS REPORT =====
+// A4 landscape, 2 students per page, image capped at 100mm.
+fun buildMarkedSheetsPdf(
+    context: Context,
+    sheets: List<MarkedAnswerSheetData>,
+    examTitle: String,
+    grade: String,
+    subject: String,
+    filenameBase: String
+): String? {
+    if (sheets.isEmpty()) return null
+    val pdf = PdfDocument()
+    val pageWidthPt = mm(297f)
+    val pageHeightPt = mm(210f)
+    val marginPt = mm(3f)
+    val cutGapPt = mm(4f)
+    val sliceWidthPt = (pageWidthPt - 2f * marginPt - cutGapPt) / 2f
+    val sliceHeightPt = pageHeightPt - 2f * marginPt
+
+    val paintBorder = Paint().apply {
+        color = AndroidColor.BLACK
+        style = Paint.Style.STROKE
+        strokeWidth = 0.6f
+        isAntiAlias = true
+    }
+    val paintThin = Paint().apply {
+        color = AndroidColor.BLACK
+        style = Paint.Style.STROKE
+        strokeWidth = 0.3f
+        isAntiAlias = true
+    }
+    val paintDashed = Paint().apply {
+        color = AndroidColor.parseColor("#888888")
+        style = Paint.Style.STROKE
+        strokeWidth = 0.5f
+        pathEffect = android.graphics.DashPathEffect(floatArrayOf(3f, 3f), 0f)
+        isAntiAlias = true
+    }
+
+    val chunks = sheets.chunked(2)
+    for (chunk in chunks) {
+        val pageInfo = PdfDocument.PageInfo.Builder(
+            pageWidthPt.toInt(),
+            pageHeightPt.toInt(),
+            pdf.pages.size + 1
+        ).create()
+        val page = pdf.startPage(pageInfo)
+        val canvas = page.canvas
+
+        drawMarkedSlice(canvas, marginPt, marginPt, sliceWidthPt, sliceHeightPt,
+            chunk.getOrNull(0), examTitle, grade, subject, paintBorder, paintThin)
+
+        val cutX = marginPt + sliceWidthPt + cutGapPt / 2f
+        canvas.drawLine(cutX, marginPt, cutX, marginPt + sliceHeightPt, paintDashed)
+
+        drawMarkedSlice(canvas, marginPt + sliceWidthPt + cutGapPt, marginPt, sliceWidthPt, sliceHeightPt,
+            chunk.getOrNull(1), examTitle, grade, subject, paintBorder, paintThin)
+
+        pdf.finishPage(page)
+    }
+
+    return try {
+        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        if (!dir.exists()) dir.mkdirs()
+        val safeBase = filenameBase.replace(Regex("[^A-Za-z0-9_\\-]"), "_")
+        val file = File(dir, "${safeBase}_${System.currentTimeMillis()}.pdf")
+        FileOutputStream(file).use { out -> pdf.writeTo(out) }
+        pdf.close()
+        file.absolutePath
+    } catch (e: Exception) {
+        pdf.close()
+        null
+    }
+}
+
+private fun drawMarkedSlice(
+    canvas: Canvas,
+    originX: Float,
+    originY: Float,
+    sliceWidth: Float,
+    sliceHeight: Float,
+    sheet: MarkedAnswerSheetData?,
+    examTitle: String,
+    grade: String,
+    subject: String,
+    paintBorder: Paint,
+    paintThin: Paint
+) {
+    canvas.drawRect(originX, originY, originX + sliceWidth, originY + sliceHeight, paintBorder)
+    if (sheet == null) return
+
+    val padX = mm(4f)
+    val topPad = mm(2f)
+    val bottomPad = mm(2f)
+
+    val metaPaint = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = mm(2.5f)
+        isAntiAlias = true
+    }
+    val namePaint = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = mm(6.5f)
+        isAntiAlias = true
+        typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
+    }
+    val scorePaint = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = mm(3.5f)
+        isAntiAlias = true
+        typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
+    }
+    val bodyPaint = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = mm(2.2f)
+        isAntiAlias = true
+        typeface = Typeface.MONOSPACE
+    }
+
+    var y = originY + topPad
+
+    // School + exam line (centered, small)
+    val metaLine = "${if (examTitle.isBlank()) "WaveUnits" else examTitle}   •   ${grade.ifBlank { "-" }}   •   ${subject.ifBlank { "-" }}"
+    val metaW = metaPaint.measureText(metaLine)
+    canvas.drawText(metaLine, originX + (sliceWidth - metaW) / 2f, y + mm(2.5f), metaPaint)
+    y += mm(4f)
+    canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
+    y += mm(0.5f)
+
+    // Student name (large, bold)
+    val nameBaseline = y + mm(6f)
+    canvas.drawText(sheet.studentName.uppercase(), originX + padX, nameBaseline, namePaint)
+    y += mm(8f)
+    canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
+    y += mm(0.5f)
+
+    // Score line
+    val scoreLine = "Score: ${sheet.score}/${sheet.total}    Percentage: ${"%.1f".format(sheet.percentage)}%    Grade: ${getKenyanGrade(sheet.percentage)}"
+    canvas.drawText(scoreLine, originX + padX, y + mm(3f), scorePaint)
+    y += mm(5f)
+    canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
+    y += mm(0.5f)
+
+    // Marked text (up to ~70mm worth of lines)
+    val textAreaTop = y
+    val textAreaMaxH = mm(70f)
+    val lineH = bodyPaint.textSize * 1.15f
+    val maxLines = (textAreaMaxH / lineH).toInt()
+    val lines = sheet.markedText.split("\n")
+    val shownLines = lines.take(maxLines)
+    for ((i, line) in shownLines.withIndex()) {
+        canvas.drawText(line, originX + padX, textAreaTop + mm(2.5f) + i * lineH, bodyPaint)
+    }
+    val overflowed = lines.size > maxLines
+    val textAreaBottom = textAreaTop + textAreaMaxH
+    if (overflowed) {
+        canvas.drawText("... (${lines.size - maxLines} more lines truncated)",
+            originX + padX, textAreaBottom - mm(1f), bodyPaint)
+    }
+    y = textAreaBottom
+    canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
+    y += mm(0.5f)
+
+    // Marked image, capped at 100mm tall
+    val imgAreaTop = y
+    val imgAreaBottom = originY + sliceHeight - bottomPad
+    val imgAreaH = imgAreaBottom - imgAreaTop
+    val imgCapH = mm(100f)
+    val imgDrawH = if (imgAreaH > imgCapH) imgCapH else imgAreaH
+
+    val bmp = decodeBase64(sheet.image)
+    if (bmp != null && imgDrawH > 0f) {
+        val srcW = bmp.width.toFloat()
+        val srcH = bmp.height.toFloat()
+        val aspect = srcW / srcH
+        // Fit inside (sliceWidth - 2*padX) x imgDrawH
+        val availW = sliceWidth - 2f * padX
+        var drawW = availW
+        var drawH = drawW / aspect
+        if (drawH > imgDrawH) {
+            drawH = imgDrawH
+            drawW = drawH * aspect
+        }
+        val drawX = originX + (sliceWidth - drawW) / 2f
+        val drawY = imgAreaTop + mm(1f)
+        val dst = android.graphics.RectF(drawX, drawY, drawX + drawW, drawY + drawH)
+        canvas.drawBitmap(bmp, null, dst, Paint().apply { isFilterBitmap = true })
+    }
+}
+
+// ===== PDF PREVIEW RENDER =====
 fun renderPdfFirstPage(pdfPath: String): Bitmap? {
     return try {
         val file = File(pdfPath)
@@ -3837,19 +4009,34 @@ fun WaveUnitsApp() {
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
                                             ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
-                                            Text("Printable Report", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                            Spacer(modifier = Modifier.height(8.dp))
-                                            Text(printableReportText, color = Color.White, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-                                            Spacer(modifier = Modifier.height(16.dp))
-                                            Button(onClick = { saveReportToDownloads(printableReportText) },
+                                            Text("Marked Sheets PDF", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                            Text("Landscape A4, 2 students per page.", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                            Spacer(modifier = Modifier.height(12.dp))
+                                            Button(
+                                                onClick = {
+                                                    val p2 = projects.find { it.id == currentProjectId }
+                                                    val path = try {
+                                                        buildMarkedSheetsPdf(
+                                                            context = context,
+                                                            sheets = markedAnswerSheets,
+                                                            examTitle = currentProjectTitle,
+                                                            grade = p2?.grade ?: "",
+                                                            subject = p2?.subjectKey ?: "",
+                                                            filenameBase = "WaveUnits_MarkedSheets"
+                                                        )
+                                                    } catch (e: Exception) {
+                                                        Toast.makeText(context, "PDF error: ${e.message}", Toast.LENGTH_LONG).show()
+                                                        null
+                                                    }
+                                                    if (path != null) {
+                                                        lastGeneratedPdfPath = path
+                                                        Toast.makeText(context, "Saved: $path", Toast.LENGTH_LONG).show()
+                                                        shareFile(path, "application/pdf")
+                                                    }
+                                                },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
-                                            ) { Text("Save to Downloads") }
-                                            Spacer(modifier = Modifier.height(8.dp))
-                                            Button(onClick = { shareReport(printableReportText) },
-                                                modifier = Modifier.fillMaxWidth(),
-                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
-                                            ) { Text("Share") }
+                                            ) { Text("Save Marked Sheets as PDF & Share") }
                                         }
                                     }
                                 } else if (sectionState.isMarkedSheetsOpen) {
@@ -3864,12 +4051,29 @@ fun WaveUnitsApp() {
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Button(
                                                 onClick = {
-                                                    printableReportText = generatePrintableMarkedSheets(markedAnswerSheets)
-                                                    sectionState = sectionState.copy(isPrintableReportOpen = true)
+                                                    val p2 = projects.find { it.id == currentProjectId }
+                                                    val path = try {
+                                                        buildMarkedSheetsPdf(
+                                                            context = context,
+                                                            sheets = markedAnswerSheets,
+                                                            examTitle = currentProjectTitle,
+                                                            grade = p2?.grade ?: "",
+                                                            subject = p2?.subjectKey ?: "",
+                                                            filenameBase = "WaveUnits_MarkedSheets"
+                                                        )
+                                                    } catch (e: Exception) {
+                                                        Toast.makeText(context, "PDF error: ${e.message}", Toast.LENGTH_LONG).show()
+                                                        null
+                                                    }
+                                                    if (path != null) {
+                                                        lastGeneratedPdfPath = path
+                                                        Toast.makeText(context, "Saved: $path", Toast.LENGTH_LONG).show()
+                                                        shareFile(path, "application/pdf")
+                                                    }
                                                 },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                            ) { Text("Printable Report") }
+                                            ) { Text("Export as PDF (landscape, 2 per page)") }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             markedAnswerSheets.forEach { sheet ->
                                                 Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
