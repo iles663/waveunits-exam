@@ -8,7 +8,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint
-import android.graphics.RectF
+import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
@@ -73,6 +73,7 @@ import java.io.FileWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -370,9 +371,9 @@ fun generatePrintableMarkedSheets(markedSheets: List<MarkedAnswerSheetData>): St
 
 // ===== PDF ANSWER SHEET GENERATOR =====
 // A4 landscape, 2 answer sheets per page, one vertical cut in the middle.
-// Uses Android's built-in PdfDocument. No external libraries.
-// Points are used (1 pt = 1/72 inch). A4 landscape = 842 x 595 pt.
-// 3mm ˜ 8.5pt, slice width 144mm ˜ 408.2pt.
+// Each slice: 144mm wide x 204mm tall.
+// Header: school name + big bold NAME line + details line.
+// Grid: two question columns of 25 (left Q1-25, right Q26-50).
 fun buildAnswerSheetPdf(
     context: Context,
     schoolName: String,
@@ -387,6 +388,8 @@ fun buildAnswerSheetPdf(
 ): String? {
     val names = if (studentNames.isEmpty()) listOf("") else studentNames
     val cappedCount = if (questionCount > 50) 50 else questionCount
+    val leftCount = (cappedCount + 1) / 2
+    val rightCount = cappedCount - leftCount
 
     val pdf = PdfDocument()
     val pageWidth = 842f
@@ -396,7 +399,6 @@ fun buildAnswerSheetPdf(
     val sliceWidth = (pageWidth - 2 * margin - cutGap) / 2f
     val sliceHeight = pageHeight - 2 * margin
 
-    // Paints
     val paintBorder = Paint().apply {
         color = AndroidColor.BLACK
         style = Paint.Style.STROKE
@@ -420,7 +422,7 @@ fun buildAnswerSheetPdf(
         color = AndroidColor.BLACK
         textSize = 9f
         isAntiAlias = true
-        typeface = android.graphics.Typeface.DEFAULT_BOLD
+        typeface = Typeface.DEFAULT_BOLD
     }
     val paintText = Paint().apply {
         color = AndroidColor.BLACK
@@ -436,7 +438,7 @@ fun buildAnswerSheetPdf(
         color = AndroidColor.BLACK
         textSize = 6.5f
         isAntiAlias = true
-        typeface = android.graphics.Typeface.MONOSPACE
+        typeface = Typeface.MONOSPACE
     }
 
     val chunks = names.chunked(2)
@@ -449,7 +451,6 @@ fun buildAnswerSheetPdf(
         val page = pdf.startPage(pageInfo)
         val canvas = page.canvas
 
-        // Left slice
         drawSlice(
             canvas = canvas,
             originX = margin,
@@ -463,7 +464,8 @@ fun buildAnswerSheetPdf(
             examTitle = examTitle,
             term = term,
             dateText = dateText,
-            questionCount = cappedCount,
+            leftCount = leftCount,
+            rightCount = rightCount,
             paintBorder = paintBorder,
             paintThin = paintThin,
             paintTextBold = paintTextBold,
@@ -472,11 +474,9 @@ fun buildAnswerSheetPdf(
             paintTextBracket = paintTextBracket
         )
 
-        // Cut line (dashed vertical) between slices
         val cutX = margin + sliceWidth + cutGap / 2f
         canvas.drawLine(cutX, margin, cutX, margin + sliceHeight, paintDashed)
 
-        // Right slice
         drawSlice(
             canvas = canvas,
             originX = margin + sliceWidth + cutGap,
@@ -490,7 +490,8 @@ fun buildAnswerSheetPdf(
             examTitle = examTitle,
             term = term,
             dateText = dateText,
-            questionCount = cappedCount,
+            leftCount = leftCount,
+            rightCount = rightCount,
             paintBorder = paintBorder,
             paintThin = paintThin,
             paintTextBold = paintTextBold,
@@ -529,7 +530,8 @@ private fun drawSlice(
     examTitle: String,
     term: String,
     dateText: String,
-    questionCount: Int,
+    leftCount: Int,
+    rightCount: Int,
     paintBorder: Paint,
     paintThin: Paint,
     paintTextBold: Paint,
@@ -537,12 +539,11 @@ private fun drawSlice(
     paintTextSmall: Paint,
     paintTextBracket: Paint
 ) {
-    // Outer border
     canvas.drawRect(originX, originY, originX + sliceWidth, originY + sliceHeight, paintBorder)
 
-    // School name
-    var y = originY + 14f
-    val schoolPaint = Paint(paintTextBold).apply { textSize = 10f }
+    // School name band
+    var y = originY + 16f
+    val schoolPaint = Paint(paintTextBold).apply { textSize = 12f }
     val schoolText = if (schoolName.isBlank()) "" else schoolName
     if (schoolText.isNotBlank()) {
         val sw = schoolPaint.measureText(schoolText)
@@ -550,93 +551,122 @@ private fun drawSlice(
     }
     y += 4f
     canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
-    y += 10f
 
-    // Header lines
-    val labelX = originX + 5f
-    val valueX = originX + 55f
-    val nameValue = if (studentName.isBlank()) "_____________________" else studentName
-    canvas.drawText("NAME:", labelX, y, paintText); canvas.drawText(nameValue, valueX, y, paintText)
-    y += 9f
-    canvas.drawText("GRADE:", labelX, y, paintText); canvas.drawText(if (grade.isBlank()) "-" else grade, valueX, y, paintText)
-    y += 9f
-    canvas.drawText("SUBJ:", labelX, y, paintText); canvas.drawText(if (subject.isBlank()) "-" else subject, valueX, y, paintText)
-    y += 9f
-    canvas.drawText("EXAM:", labelX, y, paintText); canvas.drawText(if (examTitle.isBlank()) "-" else examTitle, valueX, y, paintText)
-    y += 9f
-    canvas.drawText("TERM:", labelX, y, paintText); canvas.drawText(if (term.isBlank()) "-" else term, valueX, y, paintText)
-    y += 9f
-    canvas.drawText("DATE:", labelX, y, paintText); canvas.drawText(if (dateText.isBlank()) "-" else dateText, valueX, y, paintText)
-    y += 5f
+    // NAME band — 22pt, 1.15x horizontal stretch, fill + stroke
+    val nameBandTop = y
+    val nameBandHeight = 22f
+    val nameBandBottom = nameBandTop + nameBandHeight
+    val nameLabelX = originX + 5f
+    val nameBaselineY = nameBandTop + 16f
+    val nameValue = if (studentName.isBlank()) {
+        "________________________"
+    } else {
+        studentName.uppercase()
+    }
+    val nameFillPaint = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = 22f
+        isAntiAlias = true
+        typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
+        style = Paint.Style.FILL
+    }
+    val nameStrokePaint = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = 22f
+        isAntiAlias = true
+        typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
+        style = Paint.Style.STROKE
+        strokeWidth = 0.6f
+    }
+    val nameFullText = "NAME:  $nameValue"
+    canvas.save()
+    // Stretch horizontally 1.15x anchored at the left edge of the text
+    canvas.scale(1.15f, 1.0f, nameLabelX, nameBaselineY)
+    canvas.drawText(nameFullText, nameLabelX, nameBaselineY, nameFillPaint)
+    canvas.drawText(nameFullText, nameLabelX, nameBaselineY, nameStrokePaint)
+    canvas.restore()
+    canvas.drawLine(originX, nameBandBottom, originX + sliceWidth, nameBandBottom, paintThin)
 
-    // Divider below header
+    // Details band — small
+    y = nameBandBottom + 8f
+    val detailLeft = originX + 5f
+    canvas.drawText("GRADE: ${grade.ifBlank { "-" }}", detailLeft, y, paintText)
+    canvas.drawText("SUBJ: ${subject.ifBlank { "-" }}", detailLeft + sliceWidth * 0.28f, y, paintText)
+    canvas.drawText("EXAM: ${examTitle.ifBlank { "-" }}", detailLeft + sliceWidth * 0.55f, y, paintText)
+    y += 7f
+    canvas.drawText("TERM: ${term.ifBlank { "-" }}", detailLeft, y, paintText)
+    canvas.drawText("DATE: ${dateText.ifBlank { "-" }}", detailLeft + sliceWidth * 0.28f, y, paintText)
+    y += 3f
     canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
-    y += 1f
 
-    // Grid header row
-    val noWidth = 26f
-    val bracketWidth = (sliceWidth - noWidth) / 4f
+    // Grid — two question columns of N each
     val gridHeaderTop = y
     val gridHeaderHeight = 11f
-    canvas.drawLine(originX + noWidth, gridHeaderTop, originX + noWidth, gridHeaderTop + gridHeaderHeight, paintThin)
-    for (i in 1..3) {
-        val x = originX + noWidth + bracketWidth * i
-        canvas.drawLine(x, gridHeaderTop, x, gridHeaderTop + gridHeaderHeight, paintThin)
-    }
-    val hdrCenterY = gridHeaderTop + 8f
-    drawCenteredText(canvas, "NO", originX, originX + noWidth, hdrCenterY, paintTextBold)
-    val letters = listOf("A", "B", "C", "D")
-    for (i in 0..3) {
-        val xStart = originX + noWidth + bracketWidth * i
-        drawCenteredText(canvas, letters[i], xStart, xStart + bracketWidth, hdrCenterY, paintTextBold)
+    val halfWidth = sliceWidth / 2f
+    val noWidth = 8f
+    val bracketWidth = (halfWidth - noWidth) / 4f
+
+    // header labels for both halves
+    for (half in 0..1) {
+        val halfStartX = originX + halfWidth * half
+        val hdrCenterY = gridHeaderTop + 8f
+        drawCenteredText(canvas, "NO", halfStartX, halfStartX + noWidth, hdrCenterY, paintTextBold)
+        val letters = listOf("A", "B", "C", "D")
+        for (i in 0..3) {
+            val xStart = halfStartX + noWidth + bracketWidth * i
+            drawCenteredText(canvas, letters[i], xStart, xStart + bracketWidth, hdrCenterY, paintTextBold)
+        }
     }
     val gridHeaderBottom = gridHeaderTop + gridHeaderHeight
     canvas.drawLine(originX, gridHeaderBottom, originX + sliceWidth, gridHeaderBottom, paintThin)
 
-    // Instructions reserve at bottom: ~24pt
-    val instructionsHeight = 24f
+    // instructions reserve
+    val instructionsHeight = 16f
     val gridBottomLimit = originY + sliceHeight - instructionsHeight - 2f
     val gridTop = gridHeaderBottom
     val totalGridHeight = gridBottomLimit - gridTop
-    val rowHeight = totalGridHeight / questionCount.toFloat()
+    val maxRows = if (leftCount > rightCount) leftCount else rightCount
+    val rowHeight = totalGridHeight / maxRows.toFloat()
 
-    // Rows
-    for (q in 1..questionCount) {
-        val rowTop = gridTop + rowHeight * (q - 1)
-        val rowBottom = rowTop + rowHeight
-        val baseline = rowTop + rowHeight * 0.72f
+    // vertical divider between the two halves
+    val dividerX = originX + halfWidth
+    canvas.drawLine(dividerX, gridHeaderTop, dividerX, gridBottomLimit, paintThin)
 
-        // number
-        val numText = q.toString()
-        val numWidth = paintTextBold.measureText(numText)
-        canvas.drawText(numText, originX + noWidth - 4f - numWidth, baseline, paintTextBold)
-
-        // brackets
-        for (i in 0..3) {
-            val xStart = originX + noWidth + bracketWidth * i
-            val xCenter = xStart + bracketWidth / 2f
-            val bracketText = "[   ]"
-            val bw = paintTextBracket.measureText(bracketText)
-            canvas.drawText(bracketText, xCenter - bw / 2f, baseline, paintTextBracket)
+    // draw rows
+    for (half in 0..1) {
+        val halfStartX = originX + halfWidth * half
+        val start = if (half == 0) 1 else leftCount + 1
+        val count = if (half == 0) leftCount else rightCount
+        for (i in 0 until count) {
+            val q = start + i
+            val rowTop = gridTop + rowHeight * i
+            val rowBottom = rowTop + rowHeight
+            val baseline = rowTop + rowHeight * 0.72f
+            val numText = q.toString()
+            val numWidth = paintTextBold.measureText(numText)
+            canvas.drawText(numText, halfStartX + noWidth - 4f - numWidth, baseline, paintTextBold)
+            for (bi in 0..3) {
+                val xStart = halfStartX + noWidth + bracketWidth * bi
+                val xCenter = xStart + bracketWidth / 2f
+                val bracketText = "[   ]"
+                val bw = paintTextBracket.measureText(bracketText)
+                canvas.drawText(bracketText, xCenter - bw / 2f, baseline, paintTextBracket)
+            }
+            canvas.drawLine(halfStartX, rowBottom, halfStartX + halfWidth, rowBottom, paintThin)
         }
-
-        // horizontal row divider
-        canvas.drawLine(originX, rowBottom, originX + sliceWidth, rowBottom, paintThin)
+        // column dividers for this half
+        canvas.drawLine(halfStartX + noWidth, gridTop, halfStartX + noWidth, gridBottomLimit, paintThin)
+        for (bi in 1..3) {
+            val x = halfStartX + noWidth + bracketWidth * bi
+            canvas.drawLine(x, gridTop, x, gridBottomLimit, paintThin)
+        }
     }
 
-    // Vertical column dividers (full grid height)
-    canvas.drawLine(originX + noWidth, gridTop, originX + noWidth, gridBottomLimit, paintThin)
-    for (i in 1..3) {
-        val x = originX + noWidth + bracketWidth * i
-        canvas.drawLine(x, gridTop, x, gridBottomLimit, paintThin)
-    }
-
-    // Instructions
+    // instructions
     val instructionsTop = originY + sliceHeight - instructionsHeight
     canvas.drawLine(originX, instructionsTop, originX + sliceWidth, instructionsTop, paintThin)
-    val insY = instructionsTop + 9f
-    canvas.drawText("Write A/B/C/D inside the bracket of your choice.", originX + 5f, insY, paintTextSmall)
-    canvas.drawText("Use a dark pen. Do not scribble or cross out.", originX + 5f, insY + 8f, paintTextSmall)
+    val insY = instructionsTop + 8f
+    canvas.drawText("Write A/B/C/D inside the bracket of your choice. Use a dark pen.", originX + 5f, insY, paintTextSmall)
 }
 
 private fun drawCenteredText(canvas: Canvas, text: String, left: Float, right: Float, baselineY: Float, paint: Paint) {
@@ -645,7 +675,6 @@ private fun drawCenteredText(canvas: Canvas, text: String, left: Float, right: F
     canvas.drawText(text, centerX - w / 2f, baselineY, paint)
 }
 
-// Renders page 1 of a PDF to a Bitmap for preview
 fun renderPdfFirstPage(pdfPath: String): Bitmap? {
     return try {
         val file = File(pdfPath)
@@ -654,7 +683,6 @@ fun renderPdfFirstPage(pdfPath: String): Bitmap? {
         val renderer = PdfRenderer(pfd)
         if (renderer.pageCount <= 0) { renderer.close(); pfd.close(); return null }
         val page = renderer.openPage(0)
-        // Render at 2x for crisp preview
         val bmp = Bitmap.createBitmap(page.width * 2, page.height * 2, Bitmap.Config.ARGB_8888)
         bmp.eraseColor(AndroidColor.WHITE)
         page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
@@ -672,41 +700,38 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext "ERR: cannot open image"
             val bmp = BitmapFactory.decodeStream(isr)
             isr.close()
-            val scaled = Bitmap.createScaledBitmap(bmp, 1400, 2000, true)
+            val scaled = Bitmap.createScaledBitmap(bmp, 1000, 1400, true)
             val baos = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 90, baos)
+            scaled.compress(Bitmap.CompressFormat.JPEG, 80, baos)
             val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
             val client = OkHttpClient.Builder()
-                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(180, java.util.concurrent.TimeUnit.SECONDS)
+                .connectTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(300, TimeUnit.SECONDS)
+                .writeTimeout(60, TimeUnit.SECONDS)
                 .build()
 
             val prompt = """
+                FIRST PRIORITY: Read the student's name.
+
+                Every sheet has a prominent BOLD ALL CAPS name near the top,
+                on a line that starts with "NAME:". This is the largest text
+                on the page. Read it first and copy it into the NAME field
+                below exactly as printed.
+
                 This is a scanned student answer sheet. Report what is
                 actually on the page. Do not invent anything that is not
                 there.
 
-                STEP 1 — Look for a printed header block at the top of the
-                page. It looks like:
-                  NAME: <student name>
-                  GRADE: <grade>
-                  SUBJ: <subject>
-
-                If that block exists, output it FIRST exactly:
+                STEP 1 — Output the student header block exactly:
 
                 ---STUDENT---
-                NAME: <name as printed>
+                NAME: <name as printed, exactly>
                 GRADE: <grade as printed>
                 SUBJ: <subject as printed>
                 ---SHEET---
 
-                If there is NO printed header block but there IS a
-                handwritten name on the sheet (usually at the top), write
-                it after NAME: so the app can still identify the student:
-
-                ---STUDENT---
-                NAME: <handwritten name, your best reading>
-                ---SHEET---
+                If there is no printed NAME line but there IS a handwritten
+                name at the top, output it after NAME: as your best reading.
 
                 If there is no name at all, output:
 
@@ -717,10 +742,8 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
                 STEP 2 — Transcribe the answer section below the header.
                 Preserve whatever format the student used.
 
-                FORMAT A — Printed grid with brackets:
+                FORMAT A — Printed grid with brackets. Each row:
                   1 | [ ] [B] [ ] [ ]
-                  2 | [ ] [ ] [C] [ ]
-                  3 | [A] [ ] [ ] [ ]
                 Rules:
                   - Student writes exactly ONE letter in one bracket per row.
                   - If two brackets have letters, take the LEFTMOST one.
@@ -740,16 +763,10 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
                   - If a number has no letter, output it blank: 14 |
                   - Preserve number order.
 
-                FORMAT C — Bubble sheet:
-                Output the letter of the filled oval:
-                  1 | B
-                  2 | C
-                Unfilled rows = blank.
+                FORMAT C — Bubble sheet. Output the letter of the filled oval.
 
-                FORMAT D — Any other layout:
-                Tick marks, letters in a custom column, anything else.
-                Infer the student's answer per question number and output:
-                  <number> | <letter>
+                FORMAT D — Any other layout. Infer the answer per question
+                number and output: <number> | <letter>
                 Do not add brackets unless the page has brackets.
 
                 STEP 3 — Output everything below the ---SHEET--- line in
@@ -807,8 +824,9 @@ private suspend fun gradeWithAI(
 ): StudentResult? {
     return withContext(Dispatchers.IO) {
         val client = OkHttpClient.Builder()
-            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(180, java.util.concurrent.TimeUnit.SECONDS)
+            .connectTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(300, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
             .build()
         val prompt = """
             TASK: Grade a student's answer sheet.
@@ -919,8 +937,9 @@ private suspend fun askAIWithContext(contextText: String, question: String): Str
     return withContext(Dispatchers.IO) {
         try {
             val client = OkHttpClient.Builder()
-                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
+                .connectTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(300, TimeUnit.SECONDS)
+                .writeTimeout(60, TimeUnit.SECONDS)
                 .build()
             val prompt = "Context:\n$contextText\n\nQuestion:\n$question\n\nAnswer clearly based ONLY on the data above."
             val body = JSONObject()
@@ -968,7 +987,11 @@ private fun parseManualAnswerKey(text: String): List<Pair<Int, String>> {
 private suspend fun generateAIAnswerSheetWithTopics(questions: List<QuestionData>): String {
     return withContext(Dispatchers.IO) {
         try {
-            val client = OkHttpClient.Builder().build()
+            val client = OkHttpClient.Builder()
+                .connectTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(300, TimeUnit.SECONDS)
+                .writeTimeout(60, TimeUnit.SECONDS)
+                .build()
             val prompt = """
                 Generate an answer sheet with Kenyan CBC curriculum topics for each question.
                 The answer MUST be A, B, C, or D. If unknown, choose A.
@@ -1005,7 +1028,11 @@ private suspend fun generateAIAnswerSheetWithTopics(questions: List<QuestionData
 private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData> {
     return withContext(Dispatchers.IO) {
         try {
-            val client = OkHttpClient.Builder().build()
+            val client = OkHttpClient.Builder()
+                .connectTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(300, TimeUnit.SECONDS)
+                .writeTimeout(60, TimeUnit.SECONDS)
+                .build()
             val prompt = """
                 You are analyzing a Kenyan CBC exam paper. For every question,
                 identify its STRAND and SUB-STRAND from the official KICD
@@ -1121,11 +1148,12 @@ private suspend fun extractTextFromImage(context: Context, uri: Uri): String {
             isr.close()
             val scaled = Bitmap.createScaledBitmap(bmp, 800, 1200, true)
             val baos = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 50, baos)
+            scaled.compress(Bitmap.CompressFormat.JPEG, 70, baos)
             val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
             val client = OkHttpClient.Builder()
-                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
+                .connectTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(300, TimeUnit.SECONDS)
+                .writeTimeout(60, TimeUnit.SECONDS)
                 .build()
             val content = JSONArray()
                 .put(JSONObject().put("type", "text").put("text", "Transcribe ALL visible text word for word. If unreadable, write [unclear]."))
@@ -3386,7 +3414,7 @@ fun WaveUnitsApp() {
                                             ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text("Generate Answer Sheets (PDF)", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                            Text("A4 landscape. 2 sheets per page, 1 cut down the middle.", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                            Text("A4 landscape, 2 sheets per page. Each sheet has 2 columns of 25 questions.", color = Color(0xFF94a3b8), fontSize = 11.sp)
                                             Spacer(modifier = Modifier.height(12.dp))
 
                                             OutlinedTextField(value = genSchool, onValueChange = { genSchool = it },
