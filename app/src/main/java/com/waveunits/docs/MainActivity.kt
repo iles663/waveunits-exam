@@ -511,13 +511,13 @@ private fun drawAnswerSheetSlice(
     val schoolBandH = mm(5f)
     val dividerH = mm(0.5f)
     val nameBandH1Line = mm(16f)
-    val nameBandH2Line = mm(18f)   // <- fixed: was 32mm, now 18mm
+    val nameBandH2Line = mm(18f)
     val detailsH = mm(5f)
     val gridHeaderH = mm(5f)
     val instrH = mm(5f)
     val bottomPad = mm(1f)
     val padX = mm(6f)
-    val rowH = mm(6.5f)             // <- fixed: always 6.5mm, never shrinks
+    val rowH = mm(6.5f)
 
     val schoolPaint = Paint().apply {
         color = AndroidColor.BLACK
@@ -707,7 +707,6 @@ private fun drawCenteredText(canvas: Canvas, text: String, left: Float, right: F
 }
 
 // ===== PDF MARKED SHEETS REPORT =====
-// A4 landscape, 2 students per page, image capped at 100mm.
 fun buildMarkedSheetsPdf(
     context: Context,
     sheets: List<MarkedAnswerSheetData>,
@@ -780,6 +779,7 @@ fun buildMarkedSheetsPdf(
         null
     }
 }
+
 private fun drawMarkedSlice(
     canvas: Canvas,
     originX: Float,
@@ -796,19 +796,6 @@ private fun drawMarkedSlice(
     canvas.drawRect(originX, originY, originX + sliceWidth, originY + sliceHeight, paintBorder)
     if (sheet == null) return
 
-    // ===== FIXED Y POSITIONS (all in mm, cumulative from top of slice) =====
-    // 2      top pad
-    // 6      meta line ends
-    // 6.5    divider
-    // 11.5   student name (12pt bold) ends
-    // 12     divider
-    // 17     score line (10pt bold) ends
-    // 17.5   divider
-    // 119    marked text area ends (101.5mm tall, 41 lines at 2.43mm/line)
-    // 119.5  divider
-    // 196    image area ends (76.5mm tall)
-    // 204    bottom pad
-
     val padX = mm(4f)
     val yTopPad = mm(2f)
     val yMetaBaseline = mm(5f)
@@ -823,43 +810,39 @@ private fun drawMarkedSlice(
     val yImageTop = mm(120f)
     val yImageBottom = mm(196f)
 
-    // ===== Paints =====
     val metaPaint = Paint().apply {
         color = AndroidColor.BLACK
-        textSize = mm(2.8f)   // ~8pt
+        textSize = mm(2.8f)
         isAntiAlias = true
     }
     val namePaint = Paint().apply {
         color = AndroidColor.BLACK
-        textSize = mm(4.2f)   // ~12pt
+        textSize = mm(4.2f)
         isAntiAlias = true
         typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
     }
     val scorePaint = Paint().apply {
         color = AndroidColor.BLACK
-        textSize = mm(3.5f)   // ~10pt
+        textSize = mm(3.5f)
         isAntiAlias = true
         typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
     }
     val bodyPaint = Paint().apply {
         color = AndroidColor.BLACK
-        textSize = mm(2.1f)   // ~6pt
+        textSize = mm(2.1f)
         isAntiAlias = true
         typeface = Typeface.MONOSPACE
     }
 
-    // ===== Meta line (centered, small) =====
     val metaLine = "${if (examTitle.isBlank()) "WaveUnits" else examTitle}   •   ${grade.ifBlank { "-" }}   •   ${subject.ifBlank { "-" }}"
     val metaW = metaPaint.measureText(metaLine)
     canvas.drawText(metaLine, originX + (sliceWidth - metaW) / 2f, originY + yMetaBaseline, metaPaint)
     canvas.drawLine(originX, originY + yMetaDivider, originX + sliceWidth, originY + yMetaDivider, paintThin)
 
-    // ===== Student name (12pt bold, ALL CAPS, ellipsis if too wide) =====
     val nameText = sheet.studentName.uppercase()
     val nameAvail = sliceWidth - 2f * padX
     var nameToDraw = nameText
     if (namePaint.measureText(nameText) > nameAvail) {
-        // Ellipsis: trim characters until it fits with "..."
         var cut = nameText
         while (cut.length > 3 && namePaint.measureText("$cut...") > nameAvail) {
             cut = cut.dropLast(1)
@@ -869,12 +852,10 @@ private fun drawMarkedSlice(
     canvas.drawText(nameToDraw, originX + padX, originY + yNameBaseline, namePaint)
     canvas.drawLine(originX, originY + yNameDivider, originX + sliceWidth, originY + yNameDivider, paintThin)
 
-    // ===== Score line (10pt bold) =====
     val scoreLine = "Score: ${sheet.score}/${sheet.total}    Percentage: ${"%.1f".format(sheet.percentage)}%    Grade: ${getKenyanGrade(sheet.percentage)}"
     canvas.drawText(scoreLine, originX + padX, originY + yScoreBaseline, scorePaint)
     canvas.drawLine(originX, originY + yScoreDivider, originX + sliceWidth, originY + yScoreDivider, paintThin)
 
-    // ===== Marked text =====
     val lineH = bodyPaint.textSize * 1.15f
     val textAreaH = yTextBottom - yTextTop
     val maxLines = (textAreaH / lineH).toInt().coerceAtLeast(1)
@@ -892,7 +873,6 @@ private fun drawMarkedSlice(
     }
     canvas.drawLine(originX, originY + yTextDivider, originX + sliceWidth, originY + yTextDivider, paintThin)
 
-    // ===== Image =====
     val bmp = decodeBase64(sheet.image)
     if (bmp != null) {
         val imgAreaH = yImageBottom - yImageTop
@@ -1540,6 +1520,10 @@ fun WaveUnitsApp() {
 
     var lastSeenPrintedName by remember { mutableStateOf<String?>(null) }
 
+    // AI Answer Sheet edit state
+    var isEditingAnswerKey by remember { mutableStateOf(false) }
+    var editableKeyText by remember { mutableStateOf("") }
+
     fun saveLoginState(isLogged: Boolean) {
         prefs.edit().putBoolean("isLoggedIn", isLogged)
             .putString("email", email).putString("password", password).apply()
@@ -1588,6 +1572,8 @@ fun WaveUnitsApp() {
         allResults = emptyList()
         initialLoadComplete = false
         lastSeenPrintedName = null
+        isEditingAnswerKey = false
+        editableKeyText = ""
         currentView = "home"
     }
 
@@ -2428,6 +2414,23 @@ fun WaveUnitsApp() {
                 loadAIResponses(currentProjectId)
             } catch (e: Exception) {
                 Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun saveEditedAnswerKey(newKey: String) {
+        scope.launch {
+            try {
+                db.collection("exams").document(currentProjectId).update(mapOf(
+                    "simplifiedAnswerKey" to newKey,
+                    "answerKey" to newKey
+                )).await()
+                simplifiedAnswerKey = newKey
+                answerKey = newKey
+                extractedQuestions = parseAnswerKeyToQuestions(newKey)
+                Toast.makeText(context, "Answer key updated", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(context, "Save error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -4140,21 +4143,96 @@ fun WaveUnitsApp() {
                                 } else if (sectionState.isAIAnswerSheetOpen) {
                                     LazyColumn(modifier = Modifier.fillMaxSize()) {
                                         item {
-                                            Button(onClick = { sectionState = sectionState.copy(isAIAnswerSheetOpen = false) },
+                                            Button(onClick = {
+                                                sectionState = sectionState.copy(isAIAnswerSheetOpen = false)
+                                                isEditingAnswerKey = false
+                                                editableKeyText = ""
+                                            },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
                                             ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
-                                            Text("AI Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
-                                            Spacer(modifier = Modifier.height(8.dp))
-                                            if (simplifiedAnswerKey.isNotBlank()) {
-                                                Text("Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                                Text(simplifiedAnswerKey, color = Color.White, fontSize = 12.sp)
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text("AI Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                                Spacer(modifier = Modifier.weight(1f))
+                                                if (!isEditingAnswerKey) {
+                                                    Button(
+                                                        onClick = {
+                                                            editableKeyText = simplifiedAnswerKey
+                                                            isEditingAnswerKey = true
+                                                        },
+                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b)),
+                                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                                                    ) { Text("Edit", fontSize = 12.sp, maxLines = 1) }
+                                                } else {
+                                                    Button(
+                                                        onClick = {
+                                                            saveEditedAnswerKey(editableKeyText)
+                                                            isEditingAnswerKey = false
+                                                        },
+                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981)),
+                                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                                                    ) { Text("Save", fontSize = 12.sp, maxLines = 1) }
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Button(
+                                                        onClick = {
+                                                            isEditingAnswerKey = false
+                                                            editableKeyText = ""
+                                                        },
+                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7f1d1d)),
+                                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                                                    ) { Text("Cancel", fontSize = 12.sp, maxLines = 1) }
+                                                }
                                             }
-                                            if (aiAnswerSheet.isNotBlank()) {
+                                            Spacer(modifier = Modifier.height(12.dp))
+
+                                            if (isEditingAnswerKey) {
+                                                Text("Edit the answer key below. Format:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b), fontSize = 13.sp)
+                                                Text("Q1: Answer: B | Topic: ... | Sub-topic: ...", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                Text("Or the short form: 1:B,2:C,3:A", color = Color(0xFF94a3b8), fontSize = 11.sp)
                                                 Spacer(modifier = Modifier.height(8.dp))
-                                                Text("Full:", fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
-                                                Text(aiAnswerSheet, color = Color.White, fontSize = 12.sp)
+                                                OutlinedTextField(
+                                                    value = editableKeyText,
+                                                    onValueChange = { editableKeyText = it },
+                                                    label = { Text("Answer Key") },
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    minLines = 6,
+                                                    maxLines = 20
+                                                )
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Card(modifier = Modifier.fillMaxWidth(),
+                                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
+                                                    Column(modifier = Modifier.padding(12.dp)) {
+                                                        Text("Preview (parsed):", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 13.sp)
+                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                        val previewQs = parseAnswerKeyToQuestions(editableKeyText)
+                                                        if (previewQs.isEmpty()) {
+                                                            Text("No questions parsed. Check the format.", color = Color(0xFFef4444), fontSize = 12.sp)
+                                                        } else {
+                                                            Text("${previewQs.size} question(s) parsed", color = Color(0xFF10b981), fontSize = 12.sp)
+                                                            Spacer(modifier = Modifier.height(4.dp))
+                                                            previewQs.take(15).forEach { q ->
+                                                                Text("Q${q.number}: ${q.correctAnswer}  (${q.topic})", color = Color.White, fontSize = 11.sp)
+                                                            }
+                                                            if (previewQs.size > 15) {
+                                                                Text("… ${previewQs.size - 15} more", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                if (simplifiedAnswerKey.isNotBlank()) {
+                                                    Text("Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                                    Text(simplifiedAnswerKey, color = Color.White, fontSize = 12.sp)
+                                                }
+                                                if (aiAnswerSheet.isNotBlank()) {
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    Text("Full:", fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                                    Text(aiAnswerSheet, color = Color.White, fontSize = 12.sp)
+                                                }
                                             }
                                         }
                                     }
