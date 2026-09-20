@@ -780,7 +780,6 @@ fun buildMarkedSheetsPdf(
         null
     }
 }
-
 private fun drawMarkedSlice(
     canvas: Canvas,
     originX: Float,
@@ -797,100 +796,122 @@ private fun drawMarkedSlice(
     canvas.drawRect(originX, originY, originX + sliceWidth, originY + sliceHeight, paintBorder)
     if (sheet == null) return
 
-    val padX = mm(4f)
-    val topPad = mm(2f)
-    val bottomPad = mm(2f)
+    // ===== FIXED Y POSITIONS (all in mm, cumulative from top of slice) =====
+    // 2      top pad
+    // 6      meta line ends
+    // 6.5    divider
+    // 11.5   student name (12pt bold) ends
+    // 12     divider
+    // 17     score line (10pt bold) ends
+    // 17.5   divider
+    // 119    marked text area ends (101.5mm tall, 41 lines at 2.43mm/line)
+    // 119.5  divider
+    // 196    image area ends (76.5mm tall)
+    // 204    bottom pad
 
+    val padX = mm(4f)
+    val yTopPad = mm(2f)
+    val yMetaBaseline = mm(5f)
+    val yMetaDivider = mm(6.5f)
+    val yNameBaseline = mm(10.5f)
+    val yNameDivider = mm(12f)
+    val yScoreBaseline = mm(15.5f)
+    val yScoreDivider = mm(17.5f)
+    val yTextTop = mm(18f)
+    val yTextBottom = mm(119f)
+    val yTextDivider = mm(119.5f)
+    val yImageTop = mm(120f)
+    val yImageBottom = mm(196f)
+
+    // ===== Paints =====
     val metaPaint = Paint().apply {
         color = AndroidColor.BLACK
-        textSize = mm(2.5f)
+        textSize = mm(2.8f)   // ~8pt
         isAntiAlias = true
     }
     val namePaint = Paint().apply {
         color = AndroidColor.BLACK
-        textSize = mm(6.5f)
+        textSize = mm(4.2f)   // ~12pt
         isAntiAlias = true
         typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
     }
     val scorePaint = Paint().apply {
         color = AndroidColor.BLACK
-        textSize = mm(3.5f)
+        textSize = mm(3.5f)   // ~10pt
         isAntiAlias = true
         typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
     }
     val bodyPaint = Paint().apply {
         color = AndroidColor.BLACK
-        textSize = mm(2.2f)
+        textSize = mm(2.1f)   // ~6pt
         isAntiAlias = true
         typeface = Typeface.MONOSPACE
     }
 
-    var y = originY + topPad
-
-    // School + exam line (centered, small)
+    // ===== Meta line (centered, small) =====
     val metaLine = "${if (examTitle.isBlank()) "WaveUnits" else examTitle}   •   ${grade.ifBlank { "-" }}   •   ${subject.ifBlank { "-" }}"
     val metaW = metaPaint.measureText(metaLine)
-    canvas.drawText(metaLine, originX + (sliceWidth - metaW) / 2f, y + mm(2.5f), metaPaint)
-    y += mm(4f)
-    canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
-    y += mm(0.5f)
+    canvas.drawText(metaLine, originX + (sliceWidth - metaW) / 2f, originY + yMetaBaseline, metaPaint)
+    canvas.drawLine(originX, originY + yMetaDivider, originX + sliceWidth, originY + yMetaDivider, paintThin)
 
-    // Student name (large, bold)
-    val nameBaseline = y + mm(6f)
-    canvas.drawText(sheet.studentName.uppercase(), originX + padX, nameBaseline, namePaint)
-    y += mm(8f)
-    canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
-    y += mm(0.5f)
+    // ===== Student name (12pt bold, ALL CAPS, ellipsis if too wide) =====
+    val nameText = sheet.studentName.uppercase()
+    val nameAvail = sliceWidth - 2f * padX
+    var nameToDraw = nameText
+    if (namePaint.measureText(nameText) > nameAvail) {
+        // Ellipsis: trim characters until it fits with "..."
+        var cut = nameText
+        while (cut.length > 3 && namePaint.measureText("$cut...") > nameAvail) {
+            cut = cut.dropLast(1)
+        }
+        nameToDraw = "$cut..."
+    }
+    canvas.drawText(nameToDraw, originX + padX, originY + yNameBaseline, namePaint)
+    canvas.drawLine(originX, originY + yNameDivider, originX + sliceWidth, originY + yNameDivider, paintThin)
 
-    // Score line
+    // ===== Score line (10pt bold) =====
     val scoreLine = "Score: ${sheet.score}/${sheet.total}    Percentage: ${"%.1f".format(sheet.percentage)}%    Grade: ${getKenyanGrade(sheet.percentage)}"
-    canvas.drawText(scoreLine, originX + padX, y + mm(3f), scorePaint)
-    y += mm(5f)
-    canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
-    y += mm(0.5f)
+    canvas.drawText(scoreLine, originX + padX, originY + yScoreBaseline, scorePaint)
+    canvas.drawLine(originX, originY + yScoreDivider, originX + sliceWidth, originY + yScoreDivider, paintThin)
 
-    // Marked text (up to ~70mm worth of lines)
-    val textAreaTop = y
-    val textAreaMaxH = mm(70f)
+    // ===== Marked text =====
     val lineH = bodyPaint.textSize * 1.15f
-    val maxLines = (textAreaMaxH / lineH).toInt()
+    val textAreaH = yTextBottom - yTextTop
+    val maxLines = (textAreaH / lineH).toInt().coerceAtLeast(1)
     val lines = sheet.markedText.split("\n")
-    val shownLines = lines.take(maxLines)
-    for ((i, line) in shownLines.withIndex()) {
-        canvas.drawText(line, originX + padX, textAreaTop + mm(2.5f) + i * lineH, bodyPaint)
+    val truncated = lines.size > maxLines
+    val shownCount = if (truncated) maxLines - 1 else lines.size
+    var lineY = originY + yTextTop + bodyPaint.textSize
+    for (i in 0 until shownCount) {
+        canvas.drawText(lines[i], originX + padX, lineY, bodyPaint)
+        lineY += lineH
     }
-    val overflowed = lines.size > maxLines
-    val textAreaBottom = textAreaTop + textAreaMaxH
-    if (overflowed) {
-        canvas.drawText("... (${lines.size - maxLines} more lines truncated)",
-            originX + padX, textAreaBottom - mm(1f), bodyPaint)
+    if (truncated) {
+        val remaining = lines.size - shownCount
+        canvas.drawText("… $remaining more lines truncated", originX + padX, lineY, bodyPaint)
     }
-    y = textAreaBottom
-    canvas.drawLine(originX, y, originX + sliceWidth, y, paintThin)
-    y += mm(0.5f)
+    canvas.drawLine(originX, originY + yTextDivider, originX + sliceWidth, originY + yTextDivider, paintThin)
 
-    // Marked image, capped at 100mm tall
-    val imgAreaTop = y
-    val imgAreaBottom = originY + sliceHeight - bottomPad
-    val imgAreaH = imgAreaBottom - imgAreaTop
-    val imgCapH = mm(100f)
-    val imgDrawH = if (imgAreaH > imgCapH) imgCapH else imgAreaH
-
+    // ===== Image =====
     val bmp = decodeBase64(sheet.image)
-    if (bmp != null && imgDrawH > 0f) {
+    if (bmp != null) {
+        val imgAreaH = yImageBottom - yImageTop
+        val availW = sliceWidth - 2f * padX
+        val availH = imgAreaH
+
         val srcW = bmp.width.toFloat()
         val srcH = bmp.height.toFloat()
         val aspect = srcW / srcH
-        // Fit inside (sliceWidth - 2*padX) x imgDrawH
-        val availW = sliceWidth - 2f * padX
+
         var drawW = availW
         var drawH = drawW / aspect
-        if (drawH > imgDrawH) {
-            drawH = imgDrawH
+        if (drawH > availH) {
+            drawH = availH
             drawW = drawH * aspect
         }
+
         val drawX = originX + (sliceWidth - drawW) / 2f
-        val drawY = imgAreaTop + mm(1f)
+        val drawY = originY + yImageTop
         val dst = android.graphics.RectF(drawX, drawY, drawX + drawW, drawY + drawH)
         canvas.drawBitmap(bmp, null, dst, Paint().apply { isFilterBitmap = true })
     }
