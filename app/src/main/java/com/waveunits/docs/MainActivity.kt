@@ -208,7 +208,6 @@ data class SectionViewState(
     val isDashboardOpen: Boolean = false,
     val isQuestionPaperOpen: Boolean = false,
     val isAIAnswerSheetOpen: Boolean = false,
-    val isManualAnswerSheetOpen: Boolean = false,
     val isCollectedSheetsOpen: Boolean = false,
     val isMarkedSheetsOpen: Boolean = false,
     val isPrintableReportOpen: Boolean = false,
@@ -1186,27 +1185,6 @@ private suspend fun askAIWithContext(contextText: String, question: String): Str
     }
 }
 
-private fun parseManualAnswerKey(text: String): List<Pair<Int, String>> {
-    val answers = mutableListOf<Pair<Int, String>>()
-    val bracketPattern = Regex("""\|\s*(\d{1,2})\s*\|\s*\[([A-Da-d]?)\]\s*\|\s*\[([A-Da-d]?)\]\s*\|\s*\[([A-Da-d]?)\]\s*\|\s*\[([A-Da-d]?)\]\s*\|""")
-    for (match in bracketPattern.findAll(text)) {
-        val qNum = match.groupValues[1].toIntOrNull() ?: continue
-        val answer = (match.groupValues[2].takeIf { it.isNotBlank() }
-            ?: match.groupValues[3].takeIf { it.isNotBlank() }
-            ?: match.groupValues[4].takeIf { it.isNotBlank() }
-            ?: match.groupValues[5].takeIf { it.isNotBlank() })?.uppercase() ?: continue
-        if (qNum in 1..100) answers.add(Pair(qNum, answer))
-    }
-    if (answers.isEmpty()) {
-        val pattern = Regex("""(\d{1,2})\s*[.\-:)]?\s*([A-Da-d])""")
-        for (match in pattern.findAll(text)) {
-            val qNum = match.groupValues[1].toIntOrNull() ?: continue
-            if (qNum in 1..100) answers.add(Pair(qNum, match.groupValues[2].uppercase()))
-        }
-    }
-    return answers
-}
-
 private suspend fun generateAIAnswerSheetWithTopics(questions: List<QuestionData>): String {
     return withContext(Dispatchers.IO) {
         try {
@@ -1478,8 +1456,6 @@ fun WaveUnitsApp() {
     var questionPaperText by remember { mutableStateOf("") }
     var allQuestionPaperTexts by remember { mutableStateOf<List<String>>(emptyList()) }
     var allQuestionPaperImages by remember { mutableStateOf<List<String>>(emptyList()) }
-    var manualAnswerSheetText by remember { mutableStateOf("") }
-    var manualAnswerKey by remember { mutableStateOf("") }
     var answerKey by remember { mutableStateOf("") }
     var isGrading by remember { mutableStateOf(false) }
 
@@ -1520,9 +1496,10 @@ fun WaveUnitsApp() {
 
     var lastSeenPrintedName by remember { mutableStateOf<String?>(null) }
 
-    // AI Answer Sheet edit state
     var isEditingAnswerKey by remember { mutableStateOf(false) }
     var editableKeyText by remember { mutableStateOf("") }
+    var showRegradePromptAfterSave by remember { mutableStateOf(false) }
+    var showRegradeConfirm by remember { mutableStateOf(false) }
 
     fun saveLoginState(isLogged: Boolean) {
         prefs.edit().putBoolean("isLoggedIn", isLogged)
@@ -1777,9 +1754,6 @@ fun WaveUnitsApp() {
                     answerKey = if (simplifiedAnswerKey.isNotBlank()) simplifiedAnswerKey
                                 else if (aiAnswerSheet.isNotBlank()) parseAISheetToSimplified(aiAnswerSheet)
                                 else ""
-                    manualAnswerSheetText = doc.getString("manualAnswerSheet") ?: ""
-                    manualAnswerKey = doc.getString("manualAnswerKey") ?: ""
-                    if (answerKey.isBlank() && manualAnswerKey.isNotBlank()) answerKey = manualAnswerKey
                     if (answerKey.isNotBlank()) extractedQuestions = parseAnswerKeyToQuestions(answerKey)
 
                     val sheetsData = (doc.get("studentAnswerSheets") as? List<*>)?.filterIsInstance<Map<String, Any>>() ?: emptyList()
@@ -2375,6 +2349,31 @@ fun WaveUnitsApp() {
         }
     }
 
+    fun regradeCollectedSheets() {
+        scope.launch {
+            try {
+                isGrading = true
+                progressText = "Clearing old results..."
+                try {
+                    val ms = db.collection("exams").document(currentProjectId).collection("markedSheets").get().await()
+                    for (d in ms.documents) d.reference.delete().await()
+                } catch (_: Exception) {}
+                try {
+                    val rs = db.collection("results").whereEqualTo("examId", currentProjectId).get().await()
+                    for (d in rs.documents) d.reference.delete().await()
+                } catch (_: Exception) {}
+                markedAnswerSheets = emptyList()
+                examAnalytics = null
+                isGrading = false
+                Toast.makeText(context, "Old results cleared. Re-grading...", Toast.LENGTH_SHORT).show()
+                gradeCollectedSheets()
+            } catch (e: Exception) {
+                Toast.makeText(context, "Re-grade error: ${e.message}", Toast.LENGTH_LONG).show()
+                isGrading = false
+            }
+        }
+    }
+
     fun askAIQuestion(question: String) {
         if (question.isBlank()) {
             Toast.makeText(context, "Enter a question", Toast.LENGTH_SHORT).show(); return
@@ -2386,7 +2385,6 @@ fun WaveUnitsApp() {
                 val sb = StringBuilder()
                 if (questionPaperText.isNotBlank()) sb.append("=== QUESTION PAPER ===\n$questionPaperText\n\n")
                 if (aiAnswerSheet.isNotBlank()) sb.append("=== AI ANSWER SHEET ===\n$aiAnswerSheet\n\n")
-                if (manualAnswerSheetText.isNotBlank()) sb.append("=== MANUAL ANSWER SHEET ===\n$manualAnswerSheetText\n\n")
                 if (collectedStudentAnswerSheets.isNotEmpty()) {
                     sb.append("=== COLLECTED SHEETS ===\n")
                     collectedStudentAnswerSheets.forEachIndexed { i, s ->
@@ -2429,6 +2427,7 @@ fun WaveUnitsApp() {
                 answerKey = newKey
                 extractedQuestions = parseAnswerKeyToQuestions(newKey)
                 Toast.makeText(context, "Answer key updated", Toast.LENGTH_SHORT).show()
+                showRegradePromptAfterSave = true
             } catch (e: Exception) {
                 Toast.makeText(context, "Save error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
@@ -2535,21 +2534,6 @@ fun WaveUnitsApp() {
                                 "markingMode" to "ai"))
                             progressText = "Extracted ${allQs.size}. Total: ${newQs.size}."
                             isExtracting = false
-                            loadProjects(); loadExamData(currentProjectId); scanPhase = ""
-                        }
-                        "manual_answer_sheet" -> {
-                            progressText = "Scanning manual answer sheet..."
-                            val raw = extractTextFromImage(context, uris.first())
-                            manualAnswerSheetText = if (manualAnswerSheetText.isBlank()) raw else "$manualAnswerSheetText\n\n$raw"
-                            val parsed = parseManualAnswerKey(raw)
-                            val newKey = parsed.joinToString(",") { "${it.first}:${it.second}" }
-                            manualAnswerKey = if (manualAnswerKey.isBlank()) newKey else "$manualAnswerKey,$newKey"
-                            answerKey = manualAnswerKey
-                            db.collection("exams").document(currentProjectId).update(mapOf(
-                                "manualAnswerSheet" to manualAnswerSheetText,
-                                "manualAnswerKey" to manualAnswerKey,
-                                "answerKey" to manualAnswerKey, "markingMode" to "manual"))
-                            progressText = "Manual sheet extracted!"
                             loadProjects(); loadExamData(currentProjectId); scanPhase = ""
                         }
                         "answer_sheets" -> {
@@ -2850,6 +2834,60 @@ fun WaveUnitsApp() {
             },
             dismissButton = {
                 TextButton(onClick = { pendingSheetRename = null }) { Text("Skip") }
+            }
+        )
+    }
+
+    if (showRegradePromptAfterSave) {
+        AlertDialog(
+            onDismissRequest = { showRegradePromptAfterSave = false },
+            title = { Text("Answer key updated") },
+            text = {
+                Text(
+                    "Re-grade all collected sheets with the new answer key now?",
+                    color = Color.White
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showRegradePromptAfterSave = false
+                        if (collectedStudentAnswerSheets.isEmpty()) {
+                            Toast.makeText(context, "No collected sheets to re-grade", Toast.LENGTH_SHORT).show()
+                        } else {
+                            showRegradeConfirm = true
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                ) { Text("Re-grade now") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRegradePromptAfterSave = false }) { Text("Not now") }
+            }
+        )
+    }
+
+    if (showRegradeConfirm) {
+        AlertDialog(
+            onDismissRequest = { showRegradeConfirm = false },
+            title = { Text("Re-grade this exam?") },
+            text = {
+                Text(
+                    "This will delete ${markedAnswerSheets.size} marked sheet(s) and all current results for this exam, then re-grade ${collectedStudentAnswerSheets.size} collected sheet(s) with the current answer key. Continue?",
+                    color = Color.White
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showRegradeConfirm = false
+                        regradeCollectedSheets()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                ) { Text("Re-grade") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRegradeConfirm = false }) { Text("Cancel") }
             }
         )
     }
@@ -3532,7 +3570,7 @@ fun WaveUnitsApp() {
                             Column(modifier = Modifier.fillMaxSize()) {
                                 val nothingOpen = !sectionState.isDashboardOpen && !sectionState.isMarkedSheetsOpen &&
                                     !sectionState.isQuestionPaperOpen && !sectionState.isAIAnswerSheetOpen &&
-                                    !sectionState.isManualAnswerSheetOpen && !sectionState.isCollectedSheetsOpen &&
+                                    !sectionState.isCollectedSheetsOpen &&
                                     !sectionState.isPrintableReportOpen && !sectionState.isRosterSetupOpen &&
                                     !sectionState.isSavedRostersOpen && !sectionState.isAnswerSheetGeneratorOpen
                                 if (nothingOpen) {
@@ -3565,6 +3603,14 @@ fun WaveUnitsApp() {
                                             modifier = Modifier.fillMaxWidth(),
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
                                         ) { Text(if (isGrading) "Grading..." else "Grade Collected Sheets (${collectedStudentAnswerSheets.size})") }
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                    }
+                                    if (collectedStudentAnswerSheets.isNotEmpty() && markedAnswerSheets.isNotEmpty()) {
+                                        Button(
+                                            onClick = { showRegradeConfirm = true },
+                                            modifier = Modifier.fillMaxWidth(),
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7f1d1d))
+                                        ) { Text("Re-grade with current key (${collectedStudentAnswerSheets.size})") }
                                         Spacer(modifier = Modifier.height(8.dp))
                                     }
                                     if (markedAnswerSheets.isNotEmpty()) {
@@ -3628,12 +3674,6 @@ fun WaveUnitsApp() {
                                                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
                                             ) { Text("AI Answer Sheet") }
-                                        }
-                                        item {
-                                            Button(onClick = { sectionState = sectionState.copy(isManualAnswerSheetOpen = true) },
-                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                            ) { Text("Manual Answer Sheet") }
                                         }
                                         item {
                                             Button(onClick = { sectionState = sectionState.copy(isCollectedSheetsOpen = true) },
@@ -4193,6 +4233,7 @@ fun WaveUnitsApp() {
                                                 Text("Edit the answer key below. Format:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b), fontSize = 13.sp)
                                                 Text("Q1: Answer: B | Topic: ... | Sub-topic: ...", color = Color(0xFF94a3b8), fontSize = 11.sp)
                                                 Text("Or the short form: 1:B,2:C,3:A", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                Text("To change an answer without losing its topic, edit only the letter after 'Answer:' on that line.", color = Color(0xFF94a3b8), fontSize = 11.sp)
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 OutlinedTextField(
                                                     value = editableKeyText,
@@ -4233,32 +4274,6 @@ fun WaveUnitsApp() {
                                                     Text("Full:", fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                                     Text(aiAnswerSheet, color = Color.White, fontSize = 12.sp)
                                                 }
-                                            }
-                                        }
-                                    }
-                                } else if (sectionState.isManualAnswerSheetOpen) {
-                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                        item {
-                                            Button(onClick = { sectionState = sectionState.copy(isManualAnswerSheetOpen = false) },
-                                                modifier = Modifier.fillMaxWidth(),
-                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                            ) { Text("Back", maxLines = 1) }
-                                            Spacer(modifier = Modifier.height(8.dp))
-                                            Text("Manual Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                            Spacer(modifier = Modifier.height(8.dp))
-                                            Button(onClick = { launchScan("manual_answer_sheet") },
-                                                modifier = Modifier.fillMaxWidth(),
-                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                            ) { Text("Add") }
-                                            Spacer(modifier = Modifier.height(8.dp))
-                                            if (manualAnswerKey.isNotBlank()) {
-                                                Text("Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                                Text(manualAnswerKey, color = Color.White, fontSize = 12.sp)
-                                            }
-                                            if (manualAnswerSheetText.isNotBlank()) {
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Text("Text:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                                Text(manualAnswerSheetText, color = Color.White, fontSize = 12.sp)
                                             }
                                         }
                                     }
