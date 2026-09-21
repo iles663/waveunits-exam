@@ -213,7 +213,8 @@ data class SectionViewState(
     val isPrintableReportOpen: Boolean = false,
     val isRosterSetupOpen: Boolean = false,
     val isSavedRostersOpen: Boolean = false,
-    val isAnswerSheetGeneratorOpen: Boolean = false
+    val isAnswerSheetGeneratorOpen: Boolean = false,
+    val isHowToUseOpen: Boolean = false
 )
 
 private var OPENAI_API_KEY: String = ""
@@ -236,6 +237,93 @@ val CBC_GRADES = listOf(
     "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6",
     "Grade 7", "Grade 8", "Grade 9", "Grade 10", "Grade 11", "Grade 12"
 )
+
+// ===== HOW TO USE SCREEN =====
+@Composable
+fun HowToUseScreen(onBack: () -> Unit) {
+    val scroll = rememberScrollState()
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp)) {
+        Button(
+            onClick = onBack,
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+        ) { Text("Back", maxLines = 1) }
+        Spacer(modifier = Modifier.height(12.dp))
+        Text("How to Use WaveUnits", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+        Spacer(modifier = Modifier.height(16.dp))
+
+        HowToSection(
+            "1. Set up your classes",
+            "On the home screen tap '+ Grade', pick the CBC grade you teach, then pick the subject. " +
+            "Repeat for every class you teach. You can delete a grade or subject any time with the red Delete buttons."
+        )
+        HowToSection(
+            "2. Create an exam",
+            "Inside a class tap '+ New Exam' and give it a title (e.g. 'Opener Exam Term 1'). " +
+            "The exam becomes your workspace for that paper."
+        )
+        HowToSection(
+            "3. Generate blank answer sheets (optional)",
+            "Open the exam, tap 'Generate Answer Sheet (PDF)'. A4 landscape, 2 sheets per page. " +
+            "Save a roster of student names under 'Set Up Class Roster', or paste names comma-separated. " +
+            "Print the PDF, cut the sheets, give them to students."
+        )
+        HowToSection(
+            "4. Scan the question paper",
+            "Tap 'Question Paper' then 'Add Question Paper'. Photograph each page of the exam paper. " +
+            "The app transcribes every page (including comprehension passages and instructions) and lists " +
+            "each question's CBC strand and sub-strand. It does NOT guess answers — that is your job next."
+        )
+        HowToSection(
+            "5. Fill in the answer key",
+            "Tap 'AI Answer Sheet'. You will see a line for each question like " +
+            "Q1: Answer: _ | Topic: Numbers -> Place value. " +
+            "Tap 'Edit', change the _ after each 'Answer:' to A, B, C or D. Do NOT touch the Topic text. " +
+            "Tap 'Save'. The app rebuilds the short-form key automatically."
+        )
+        HowToSection(
+            "6. Collect student answer sheets",
+            "Tap 'Collected Sheets' then 'Add Answer Sheets'. Photograph each student's completed sheet. " +
+            "The app reads the printed NAME at the top of each sheet. If a name is unreadable it will ask you to type it."
+        )
+        HowToSection(
+            "7. Grade",
+            "On the exam screen tap 'Grade Collected Sheets'. The AI compares each student's marks to your key. " +
+            "Blank answers count as wrong; questions you left unanswered in the key are skipped entirely and do " +
+            "NOT drag the total down."
+        )
+        HowToSection(
+            "8. Marked sheets and reports",
+            "Tap 'Marked Sheets' to see every student's scored sheet with their photo. " +
+            "Use 'Export as PDF' for a landscape printout, 2 students per page, ready to hand back."
+        )
+        HowToSection(
+            "9. Analytics",
+            "Tap 'View Exam Analytics' for one-exam stats: class average, grade distribution, per-question difficulty, " +
+            "topic strengths and weaknesses. Tap 'Class Path Analytics' inside a subject to see how the same students " +
+            "performed across every exam in that class path — combined averages, ranks, most-failed topics, trends."
+        )
+        HowToSection(
+            "10. Changing your key after grading",
+            "If you realise a question's correct answer was wrong, open 'AI Answer Sheet', tap 'Edit', fix the letter, " +
+            "tap 'Save'. The app offers to re-grade on the spot. Say yes and every sheet is re-scored against the new key."
+        )
+        HowToSection(
+            "Tips",
+            "- Photography matters. Straight, flat, well-lit sheets read far better.\n" +
+            "- Write answers on the printed sheet inside the [ ] brackets; one letter per row.\n" +
+            "- If the scanner fails on a page, delete the exam's collected sheets and re-add that page only.\n" +
+            "- The answer key is long-form. Never delete the Topic part — it is what powers topic analytics."
+        )
+    }
+}
+
+@Composable
+private fun HowToSection(title: String, body: String) {
+    Text(title, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+    Spacer(modifier = Modifier.height(4.dp))
+    Text(body, color = Color.White, fontSize = 13.sp)
+    Spacer(modifier = Modifier.height(16.dp))
+}
 
 // ===== UTILITY FUNCTIONS =====
 fun parseCreatedAt(value: Any?): Long = when (value) {
@@ -261,10 +349,11 @@ fun decodeBase64(base64: String): Bitmap? = try {
 fun parseAnswerKeyToQuestions(answerKeyString: String): List<QuestionData> {
     val questions = mutableListOf<QuestionData>()
     if (answerKeyString.isBlank()) return questions
-    val pattern1 = Regex("""Q(\d+):\s*Answer:\s*([A-Da-d])\s*\|\s*Topic:\s*([^|]+)\s*\|\s*Sub-topic:\s*([^|]+)""")
+    val pattern1 = Regex("""Q?(\d+)\s*:\s*Answer:\s*([A-Da-d_])\s*\|\s*Topic:\s*([^|\n]+)(?:\s*\|\s*Sub-topic:\s*([^|\n]+))?""")
     for (match in pattern1.findAll(answerKeyString)) {
         val number = match.groupValues[1].toIntOrNull() ?: continue
-        val answer = match.groupValues[2].uppercase()
+        val raw = match.groupValues[2]
+        val answer = if (raw == "_" || raw.isBlank()) "" else raw.uppercase()
         val topic = match.groupValues[3].trim()
         val subTopic = match.groupValues[4].trim()
         questions.add(QuestionData(number, topic, answer, subTopic))
@@ -282,11 +371,13 @@ fun parseAnswerKeyToQuestions(answerKeyString: String): List<QuestionData> {
 fun parseAISheetToSimplified(aiAnswerSheet: String): String {
     if (aiAnswerSheet.isBlank()) return ""
     val answers = mutableListOf<String>()
-    val pattern1 = Regex("""Q?(\d+)\s*:\s*Answer:\s*([A-Da-d]|null|NULL)""", RegexOption.IGNORE_CASE)
+    val pattern1 = Regex("""Q?(\d+)\s*:\s*Answer:\s*([A-Da-d]|null|NULL|_)""", RegexOption.IGNORE_CASE)
     for (match in pattern1.findAll(aiAnswerSheet)) {
         val number = match.groupValues[1].toIntOrNull() ?: continue
-        val answer = match.groupValues[2].uppercase()
-        if (answer == "NULL" || answer.isBlank()) continue
+        val raw = match.groupValues[2]
+        if (raw == "_" || raw.isBlank()) continue
+        val answer = raw.uppercase()
+        if (answer == "NULL") continue
         answers.add("$number:$answer")
     }
     if (answers.isNotEmpty()) return answers.joinToString(",")
@@ -346,26 +437,6 @@ fun generateStudentComparisons(leaderboard: List<StudentPerformance>): List<Stud
         comparisons.add(StudentComparisonData(a.name, b.name, a.averageScore - b.averageScore, a.averageScore >= 50.0, b.averageScore >= 50.0))
     }
     return comparisons
-}
-
-fun generatePrintableMarkedSheets(markedSheets: List<MarkedAnswerSheetData>): String {
-    val sb = StringBuilder()
-    sb.append("========================================\n")
-    sb.append("  WAVEUNITS - MARKED ANSWER SHEETS REPORT\n")
-    sb.append("  Generated: ${formatTimestamp(System.currentTimeMillis())}\n")
-    sb.append("========================================\n\n")
-    var countOnPage = 0
-    val maxPerPage = 3
-    for (sheet in markedSheets) {
-        if (countOnPage >= maxPerPage) {
-            sb.append("\n============= NEW PAGE =============\n\n")
-            countOnPage = 0
-        }
-        sb.append(sheet.markedText).append("\n\n")
-        countOnPage++
-    }
-    sb.append("\n============= END OF REPORT =============\n")
-    return sb.toString()
 }
 
 // ===== PDF HELPERS =====
@@ -1072,7 +1143,13 @@ private suspend fun gradeWithAI(
 
             In either format, compare each student answer to the correct
             answer from the ANSWER KEY below by question number.
-            Blank or missing = WRONG.
+            Blank or missing student answer = WRONG, BUT ONLY IF the key
+            has a real letter for that question.
+
+            IMPORTANT: if a question's correct answer in the key is
+            missing, blank, "_" or not one of A/B/C/D, SKIP that question
+            entirely: do not count it for the student, do not count it in
+            the total, and do not print an ANALYTICS line for it.
 
             ============ PART 1 - HUMAN-READABLE SHEET ============
             Write one line per graded question:
@@ -1082,16 +1159,20 @@ private suspend fun gradeWithAI(
             Q3: Student chose nothing, correct answer is D -> WRONG
 
             Then:
-            SCORE: <number correct> / <total>
+            SCORE: <number correct> / <total graded>
             PERCENTAGE: <number>%
             GRADE: <letter>
+
+            <total graded> counts ONLY questions whose key entry has a
+            real A/B/C/D answer. Skipped questions must not appear in the
+            human-readable list either.
 
             ============ PART 2 - MACHINE-READABLE BLOCK ============
             After the score, print this line on its own:
 
             ---ANALYTICS---
 
-            Then ONE line per question, EXACTLY this format:
+            Then ONE line per graded question, EXACTLY this format:
 
             Q<number>|<studentLetter>|<correctLetter>|<C or W>|<topic>
 
@@ -1185,47 +1266,6 @@ private suspend fun askAIWithContext(contextText: String, question: String): Str
     }
 }
 
-private suspend fun generateAIAnswerSheetWithTopics(questions: List<QuestionData>): String {
-    return withContext(Dispatchers.IO) {
-        try {
-            val client = OkHttpClient.Builder()
-                .connectTimeout(60, TimeUnit.SECONDS)
-                .readTimeout(300, TimeUnit.SECONDS)
-                .writeTimeout(60, TimeUnit.SECONDS)
-                .build()
-            val prompt = """
-                Generate an answer sheet with Kenyan CBC curriculum topics for each question.
-                The answer MUST be A, B, C, or D. If unknown, choose A.
-                Questions:
-                ${questions.joinToString("\n") { "Q${it.number}: ${it.topic} - Answer: ${it.correctAnswer}" }}
-                Format:
-                Q1: Answer: D | Topic: Life of Prophets / Messengers | Sub-topic: Parables
-            """.trimIndent()
-            val body = JSONObject()
-                .put("model", "gpt-5.6-luna")
-                .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
-                .put("max_completion_tokens", 3000)
-                .toString()
-            val req = Request.Builder()
-                .url("https://api.openai.com/v1/chat/completions")
-                .post(body.toRequestBody("application/json".toMediaType()))
-                .addHeader("Authorization", "Bearer $OPENAI_API_KEY")
-                .build()
-            client.newCall(req).execute().use { res ->
-                val js = res.body?.string() ?: return@use ""
-                if (!res.isSuccessful) return@use ""
-                try {
-                    JSONObject(js).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content").trim()
-                } catch (e: Exception) {
-                    questions.joinToString("\n") { "Q${it.number}: Answer: ${it.correctAnswer} | Topic: ${it.topic}" }
-                }
-            }
-        } catch (e: Exception) {
-            questions.joinToString("\n") { "Q${it.number}: Answer: ${it.correctAnswer} | Topic: ${it.topic}" }
-        }
-    }
-}
-
 private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData> {
     return withContext(Dispatchers.IO) {
         try {
@@ -1237,7 +1277,7 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
             val prompt = """
                 You are analyzing a Kenyan CBC exam paper. For every question,
                 identify its STRAND and SUB-STRAND from the official KICD
-                rationalized curriculum, and the correct answer.
+                rationalized curriculum. Do NOT identify the correct answer.
 
                 ## CBC STRANDS BY LEARNING AREA
 
@@ -1299,10 +1339,12 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
                 - number (integer)
                 - strand (from the list above)
                 - subStrand (from the list above)
-                - correctAnswer (MUST be A, B, C, or D.)
+
+                Do NOT guess or invent the correct answer. Do NOT include
+                a correctAnswer field. The teacher will fill answers in.
 
                 Return ONLY JSON:
-                [{"number":1,"strand":"Life of Prophets / Messengers","subStrand":"Parables","correctAnswer":"D"}, ...]
+                [{"number":1,"strand":"Life of Prophets / Messengers","subStrand":"Parables"}, ...]
 
                 Question paper:
                 $rawText
@@ -1328,12 +1370,10 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
                 val qs = mutableListOf<QuestionData>()
                 for (i in 0 until arr.length()) {
                     val o = arr.getJSONObject(i)
-                    val answer = o.optString("correctAnswer", "A").uppercase().take(1)
-                    val safe = if (answer in listOf("A", "B", "C", "D")) answer else "A"
                     val strand = o.optString("strand", "General")
                     val subStrand = o.optString("subStrand", "General")
                     val topic = if (subStrand.isBlank() || subStrand == "General") strand else "$strand -> $subStrand"
-                    qs.add(QuestionData(o.getInt("number"), topic, safe, subStrand))
+                    qs.add(QuestionData(o.getInt("number"), topic, "", subStrand))
                 }
                 qs
             }
@@ -1347,22 +1387,48 @@ private suspend fun extractTextFromImage(context: Context, uri: Uri): String {
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext ""
             val bmp = BitmapFactory.decodeStream(isr)
             isr.close()
-            val scaled = Bitmap.createScaledBitmap(bmp, 800, 1200, true)
+            val scaled = Bitmap.createScaledBitmap(bmp, 1200, 1700, true)
             val baos = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 70, baos)
+            scaled.compress(Bitmap.CompressFormat.JPEG, 85, baos)
             val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
             val client = OkHttpClient.Builder()
                 .connectTimeout(60, TimeUnit.SECONDS)
                 .readTimeout(300, TimeUnit.SECONDS)
                 .writeTimeout(60, TimeUnit.SECONDS)
                 .build()
+            val prompt = """
+                Transcribe EVERYTHING visible on this exam paper page,
+                top to bottom, left to right, word for word. Do NOT
+                summarise and do NOT skip any part.
+
+                You MUST include:
+                - The exam header (school, subject, grade, term, date, time).
+                - Instructions to candidates.
+                - Comprehension passages, cloze passages, poems, dialogue
+                  extracts, and any other reading material. Copy them in
+                  full, exactly as printed, even if long.
+                - Every question number and its full wording, including
+                  sub-questions labelled (a), (b), (c) and roman numerals.
+                - Multiple choice options A, B, C, D.
+                - Table contents, lists, and bullet points.
+                - Captions and labels that appear under diagrams or
+                  pictures. If a diagram has no text, write
+                  [diagram without text] on its own line.
+                - Marks shown in brackets, e.g. (2 marks).
+
+                Preserve line breaks where the paper uses them. If a word
+                is genuinely unreadable, write [unclear].
+
+                Do not answer any question. Do not translate. Just
+                transcribe.
+            """.trimIndent()
             val content = JSONArray()
-                .put(JSONObject().put("type", "text").put("text", "Transcribe ALL visible text word for word. If unreadable, write [unclear]."))
+                .put(JSONObject().put("type", "text").put("text", prompt))
                 .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$b64")))
             val body = JSONObject()
                 .put("model", "gpt-5.6-luna")
                 .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
-                .put("max_completion_tokens", 4000)
+                .put("max_completion_tokens", 6000)
                 .toString()
             val req = Request.Builder()
                 .url("https://api.openai.com/v1/chat/completions")
@@ -1754,7 +1820,7 @@ fun WaveUnitsApp() {
                     answerKey = if (simplifiedAnswerKey.isNotBlank()) simplifiedAnswerKey
                                 else if (aiAnswerSheet.isNotBlank()) parseAISheetToSimplified(aiAnswerSheet)
                                 else ""
-                    if (answerKey.isNotBlank()) extractedQuestions = parseAnswerKeyToQuestions(answerKey)
+                    if (aiAnswerSheet.isNotBlank()) extractedQuestions = parseAnswerKeyToQuestions(aiAnswerSheet)
 
                     val sheetsData = (doc.get("studentAnswerSheets") as? List<*>)?.filterIsInstance<Map<String, Any>>() ?: emptyList()
                     collectedStudentAnswerSheets = sheetsData.map { sheet ->
@@ -2266,7 +2332,7 @@ fun WaveUnitsApp() {
                 }
                 if (aiSheetForGrading.isBlank()) {
                     isGrading = false
-                    Toast.makeText(context, "Cannot grade: no AI answer sheet saved. Scan the question paper first.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Cannot grade: no answer key. Scan the question paper and fill in answers first.", Toast.LENGTH_LONG).show()
                     return@launch
                 }
 
@@ -2384,7 +2450,7 @@ fun WaveUnitsApp() {
                 loadExamData(currentProjectId)
                 val sb = StringBuilder()
                 if (questionPaperText.isNotBlank()) sb.append("=== QUESTION PAPER ===\n$questionPaperText\n\n")
-                if (aiAnswerSheet.isNotBlank()) sb.append("=== AI ANSWER SHEET ===\n$aiAnswerSheet\n\n")
+                if (aiAnswerSheet.isNotBlank()) sb.append("=== ANSWER KEY ===\n$aiAnswerSheet\n\n")
                 if (collectedStudentAnswerSheets.isNotEmpty()) {
                     sb.append("=== COLLECTED SHEETS ===\n")
                     collectedStudentAnswerSheets.forEachIndexed { i, s ->
@@ -2416,20 +2482,25 @@ fun WaveUnitsApp() {
         }
     }
 
-    fun saveEditedAnswerKey(newKey: String) {
+    fun saveEditedAnswerKey(newLongFormKey: String) {
         scope.launch {
             try {
-                db.collection("exams").document(currentProjectId).update(mapOf(
-                    "simplifiedAnswerKey" to newKey,
-                    "answerKey" to newKey
-                )).await()
-                simplifiedAnswerKey = newKey
-                answerKey = newKey
-                extractedQuestions = parseAnswerKeyToQuestions(newKey)
+                val shortForm = parseAISheetToSimplified(newLongFormKey)
+                val finalShort = if (shortForm.isNotBlank()) shortForm else ""
+                val updates = mapOf(
+                    "aiAnswerSheet" to newLongFormKey,
+                    "simplifiedAnswerKey" to finalShort,
+                    "answerKey" to finalShort
+                )
+                db.collection("exams").document(currentProjectId).update(updates).await()
+                aiAnswerSheet = newLongFormKey
+                simplifiedAnswerKey = finalShort
+                answerKey = finalShort
+                extractedQuestions = parseAnswerKeyToQuestions(newLongFormKey)
                 Toast.makeText(context, "Answer key updated", Toast.LENGTH_SHORT).show()
                 showRegradePromptAfterSave = true
             } catch (e: Exception) {
-                Toast.makeText(context, "Save error: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Save error: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -2517,22 +2588,28 @@ fun WaveUnitsApp() {
                             questionPaperText = newTexts.joinToString("\n\n--- PAGE BREAK ---\n\n")
                             allQuestionPaperTexts = newTexts
                             allQuestionPaperImages = newImages
-                            val newAI = generateAIAnswerSheetWithTopics(allQs)
-                            aiAnswerSheet = if (aiAnswerSheet.isBlank()) newAI else "$aiAnswerSheet\n\n$newAI"
-                            val newSimp = parseAISheetToSimplified(newAI)
-                            simplifiedAnswerKey = if (simplifiedAnswerKey.isBlank()) newSimp else "$simplifiedAnswerKey,$newSimp"
-                            answerKey = simplifiedAnswerKey
+
+                            // Topics only. Teacher fills the answers.
+                            val newLongForm = newQs.joinToString("\n") { q ->
+                                "Q${q.number}: Answer: _ | Topic: ${q.topic}"
+                            }
+                            aiAnswerSheet = if (aiAnswerSheet.isBlank()) newLongForm
+                                            else "$aiAnswerSheet\n$newLongForm"
+                            simplifiedAnswerKey = ""
+                            answerKey = ""
+                            extractedQuestions = parseAnswerKeyToQuestions(aiAnswerSheet)
+
                             db.collection("exams").document(currentProjectId).update(mapOf(
                                 "questionPaperImages" to newImages,
                                 "allQuestionTexts" to newTexts,
                                 "questionPaperText" to questionPaperText,
                                 "aiAnswerSheet" to aiAnswerSheet,
-                                "simplifiedAnswerKey" to simplifiedAnswerKey,
-                                "answerKey" to simplifiedAnswerKey,
+                                "simplifiedAnswerKey" to "",
+                                "answerKey" to "",
                                 "extractedTextSaved" to true,
                                 "answerSheetGenerated" to true,
-                                "markingMode" to "ai"))
-                            progressText = "Extracted ${allQs.size}. Total: ${newQs.size}."
+                                "markingMode" to "teacher-edited"))
+                            progressText = "Extracted ${allQs.size} questions (topics only). Total: ${newQs.size}. Fill in answers on the AI Answer Sheet screen."
                             isExtracting = false
                             loadProjects(); loadExamData(currentProjectId); scanPhase = ""
                         }
@@ -2978,6 +3055,9 @@ fun WaveUnitsApp() {
             ) { padding ->
                 Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
                     when (currentView) {
+                        "howToUse" -> {
+                            HowToUseScreen(onBack = { currentView = "home" })
+                        }
                         "home" -> {
                             if (!initialLoadComplete) {
                                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -2997,14 +3077,20 @@ fun WaveUnitsApp() {
                                             Toast.makeText(context, "Reloading...", Toast.LENGTH_SHORT).show()
                                         },
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569)),
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                                    ) { Text("Reload", fontSize = 12.sp, maxLines = 1) }
-                                    Spacer(modifier = Modifier.width(6.dp))
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                    ) { Text("Reload", fontSize = 11.sp, maxLines = 1) }
+                                    Spacer(modifier = Modifier.width(4.dp))
                                     Button(
                                         onClick = { showAddGradeDialog = true },
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981)),
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                                    ) { Text("+ Grade", fontSize = 12.sp, maxLines = 1) }
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                    ) { Text("+ Grade", fontSize = 11.sp, maxLines = 1) }
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Button(
+                                        onClick = { currentView = "howToUse" },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa)),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                    ) { Text("How to Use", fontSize = 11.sp, maxLines = 1) }
                                 }
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -3052,6 +3138,12 @@ fun WaveUnitsApp() {
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa)),
                                             modifier = Modifier.fillMaxWidth(0.7f)
                                         ) { Text("Load My Classes") }
+                                        Spacer(modifier = Modifier.height(12.dp))
+                                        Button(
+                                            onClick = { currentView = "howToUse" },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b)),
+                                            modifier = Modifier.fillMaxWidth(0.7f)
+                                        ) { Text("How to Use WaveUnits") }
                                     }
                                 } else {
                                     LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -3572,7 +3664,8 @@ fun WaveUnitsApp() {
                                     !sectionState.isQuestionPaperOpen && !sectionState.isAIAnswerSheetOpen &&
                                     !sectionState.isCollectedSheetsOpen &&
                                     !sectionState.isPrintableReportOpen && !sectionState.isRosterSetupOpen &&
-                                    !sectionState.isSavedRostersOpen && !sectionState.isAnswerSheetGeneratorOpen
+                                    !sectionState.isSavedRostersOpen && !sectionState.isAnswerSheetGeneratorOpen &&
+                                    !sectionState.isHowToUseOpen
                                 if (nothingOpen) {
                                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                         Button(
@@ -3595,6 +3688,13 @@ fun WaveUnitsApp() {
                                         modifier = Modifier.fillMaxWidth(),
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
                                     ) { Text("Data Dashboard") }
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    Button(
+                                        onClick = { sectionState = sectionState.copy(isHowToUseOpen = true) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                                    ) { Text("How to Use") }
                                     Spacer(modifier = Modifier.height(8.dp))
 
                                     if (collectedStudentAnswerSheets.isNotEmpty()) {
@@ -3687,6 +3787,16 @@ fun WaveUnitsApp() {
                                                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFef4444))
                                             ) { Text("Delete Exam") }
+                                        }
+                                    }
+                                }
+
+                                if (sectionState.isHowToUseOpen) {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        item {
+                                            HowToUseScreen(onBack = {
+                                                sectionState = sectionState.copy(isHowToUseOpen = false)
+                                            })
                                         }
                                     }
                                 }
@@ -4168,6 +4278,8 @@ fun WaveUnitsApp() {
                                             ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text("Question Paper", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa))
+                                            Text("Scans list topics only. You fill in the answers next.",
+                                                color = Color(0xFF94a3b8), fontSize = 11.sp)
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Button(onClick = { launchScan("question_paper") },
                                                 modifier = Modifier.fillMaxWidth(),
@@ -4196,12 +4308,12 @@ fun WaveUnitsApp() {
                                                 modifier = Modifier.fillMaxWidth(),
                                                 verticalAlignment = Alignment.CenterVertically
                                             ) {
-                                                Text("AI Answer Sheet", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                                Text("Answer Key", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                                 Spacer(modifier = Modifier.weight(1f))
                                                 if (!isEditingAnswerKey) {
                                                     Button(
                                                         onClick = {
-                                                            editableKeyText = simplifiedAnswerKey
+                                                            editableKeyText = aiAnswerSheet
                                                             isEditingAnswerKey = true
                                                         },
                                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b)),
@@ -4230,15 +4342,16 @@ fun WaveUnitsApp() {
                                             Spacer(modifier = Modifier.height(12.dp))
 
                                             if (isEditingAnswerKey) {
-                                                Text("Edit the answer key below. Format:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b), fontSize = 13.sp)
-                                                Text("Q1: Answer: B | Topic: ... | Sub-topic: ...", color = Color(0xFF94a3b8), fontSize = 11.sp)
-                                                Text("Or the short form: 1:B,2:C,3:A", color = Color(0xFF94a3b8), fontSize = 11.sp)
-                                                Text("To change an answer without losing its topic, edit only the letter after 'Answer:' on that line.", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                Text("Fill in the letter after each 'Answer:'. Keep the Topic text as is.",
+                                                    fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b), fontSize = 13.sp)
+                                                Text("Q1: Answer: B | Topic: Life of Prophets -> Parables", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                Text("Any question left as Answer: _ is skipped at grading.",
+                                                    color = Color(0xFF94a3b8), fontSize = 11.sp)
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 OutlinedTextField(
                                                     value = editableKeyText,
                                                     onValueChange = { editableKeyText = it },
-                                                    label = { Text("Answer Key") },
+                                                    label = { Text("Answer Key (long form)") },
                                                     modifier = Modifier.fillMaxWidth(),
                                                     minLines = 6,
                                                     maxLines = 20
@@ -4253,26 +4366,39 @@ fun WaveUnitsApp() {
                                                         if (previewQs.isEmpty()) {
                                                             Text("No questions parsed. Check the format.", color = Color(0xFFef4444), fontSize = 12.sp)
                                                         } else {
-                                                            Text("${previewQs.size} question(s) parsed", color = Color(0xFF10b981), fontSize = 12.sp)
+                                                            val answered = previewQs.count { it.correctAnswer.isNotBlank() }
+                                                            Text("${previewQs.size} question(s), $answered answered",
+                                                                color = Color(0xFF10b981), fontSize = 12.sp)
                                                             Spacer(modifier = Modifier.height(4.dp))
-                                                            previewQs.take(15).forEach { q ->
-                                                                Text("Q${q.number}: ${q.correctAnswer}  (${q.topic})", color = Color.White, fontSize = 11.sp)
+                                                            previewQs.take(20).forEach { q ->
+                                                                val mark = if (q.correctAnswer.isBlank()) "_" else q.correctAnswer
+                                                                Text("Q${q.number}: $mark  (${q.topic})", color = Color.White, fontSize = 11.sp)
                                                             }
-                                                            if (previewQs.size > 15) {
-                                                                Text("… ${previewQs.size - 15} more", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                            if (previewQs.size > 20) {
+                                                                Text("… ${previewQs.size - 20} more", color = Color(0xFF94a3b8), fontSize = 11.sp)
                                                             }
                                                         }
                                                     }
                                                 }
                                             } else {
-                                                if (simplifiedAnswerKey.isNotBlank()) {
-                                                    Text("Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                                    Text(simplifiedAnswerKey, color = Color.White, fontSize = 12.sp)
-                                                }
                                                 if (aiAnswerSheet.isNotBlank()) {
+                                                    Text("Answer Key (with topics):", fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    val totalQs = extractedQuestions.size
+                                                    val answeredQs = extractedQuestions.count { it.correctAnswer.isNotBlank() }
+                                                    Text("$answeredQs of $totalQs questions answered",
+                                                        color = if (answeredQs == totalQs && totalQs > 0) Color(0xFF10b981) else Color(0xFFf59e0b),
+                                                        fontSize = 12.sp)
                                                     Spacer(modifier = Modifier.height(8.dp))
-                                                    Text("Full:", fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                                     Text(aiAnswerSheet, color = Color.White, fontSize = 12.sp)
+                                                } else {
+                                                    Text("No answer key yet. Scan the question paper first, then come back to fill in the answers.",
+                                                        color = Color(0xFF94a3b8), fontSize = 13.sp)
+                                                }
+                                                if (simplifiedAnswerKey.isNotBlank()) {
+                                                    Spacer(modifier = Modifier.height(12.dp))
+                                                    Text("Simplified Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
+                                                    Text(simplifiedAnswerKey, color = Color.White, fontSize = 12.sp)
                                                 }
                                             }
                                         }
@@ -4497,67 +4623,26 @@ fun WaveUnitsApp() {
                                                         Text("Question-by-Question Analysis",
                                                             fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 16.sp)
                                                         Spacer(modifier = Modifier.height(4.dp))
-                                                        Text("Tap any question to see the students who missed it.",
+                                                        Text("Correct count, total attempted, difficulty.",
                                                             color = Color(0xFF94a3b8), fontSize = 11.sp)
                                                         Spacer(modifier = Modifier.height(12.dp))
                                                         if (a.questionBreakdown.isEmpty()) {
                                                             Text("No per-question data. Re-grade the sheets.",
                                                                 color = Color(0xFFf59e0b), fontSize = 12.sp)
                                                         } else {
-                                                            val topicCounts = a.questionBreakdown.groupingBy { it.topic }.eachCount()
                                                             a.questionBreakdown.forEach { q ->
-                                                                val failedStudents = allResults
-                                                                    .filter { st -> st.questions.any { qr -> qr.questionNumber == q.questionNumber && !qr.isCorrect } }
-                                                                    .map { it.studentName }
-                                                                    .sorted()
-                                                                val parts = q.difficulty.split(" | ")
-                                                                val diffLabel = parts.getOrNull(0) ?: q.difficulty
-                                                                val correctPart = parts.getOrNull(1) ?: "${q.correctCount}/${q.totalCount} correct"
-                                                                val failCount = q.totalCount - q.correctCount
-                                                                val color = when (diffLabel) {
-                                                                    "Easy" -> Color(0xFF10b981)
-                                                                    "Moderate" -> Color(0xFFf59e0b)
-                                                                    else -> Color(0xFFef4444)
-                                                                }
-                                                                var expanded by remember { mutableStateOf(false) }
-                                                                Card(
-                                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                                                                        .clickable { expanded = !expanded },
-                                                                    colors = CardDefaults.cardColors(
-                                                                        containerColor = if (expanded) Color(0xFF16213f) else Color(0xFF0f172a)
-                                                                    )
-                                                                ) {
+                                                                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
                                                                     Column(modifier = Modifier.padding(12.dp)) {
-                                                                        Row(modifier = Modifier.fillMaxWidth(),
-                                                                            horizontalArrangement = Arrangement.SpaceBetween) {
-                                                                            Text("Q${q.questionNumber}", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 14.sp)
-                                                                            Text(diffLabel, color = color, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                                                        }
-                                                                        Spacer(modifier = Modifier.height(4.dp))
-                                                                        Text(q.topic, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                                                                        Spacer(modifier = Modifier.height(4.dp))
-                                                                        Text(
-                                                                            "$correctPart | $failCount failed" +
-                                                                            if (topicCounts[q.topic] != null && topicCounts[q.topic]!! > 1)
-                                                                                " | topic repeated ${topicCounts[q.topic]}x on this paper"
-                                                                            else "",
-                                                                            color = Color(0xFF94a3b8), fontSize = 11.sp
-                                                                        )
-                                                                        if (expanded) {
-                                                                            Spacer(modifier = Modifier.height(10.dp))
-                                                                            Divider(color = Color(0xFF1e293b), thickness = 1.dp)
-                                                                            Spacer(modifier = Modifier.height(10.dp))
-                                                                            Text("Strand -> Sub-strand", color = Color(0xFF60a5fa), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                                                            Text(q.topic, color = Color.White, fontSize = 12.sp)
-                                                                            Spacer(modifier = Modifier.height(8.dp))
-                                                                            Text("Failed by $failCount student${if (failCount == 1) "" else "s"}",
-                                                                                color = Color(0xFFef4444), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                                                            if (failedStudents.isEmpty()) {
-                                                                                Text("No one failed this question. Nice.", color = Color(0xFF10b981), fontSize = 12.sp)
-                                                                            } else {
-                                                                                failedStudents.forEach { name -> Text("  - $name", color = Color.White, fontSize = 12.sp) }
-                                                                            }
-                                                                        }
+                                                                        Text("Q${q.questionNumber}  -  ${q.topic}",
+                                                                            color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                                                        Text(q.difficulty,
+                                                                            color = when {
+                                                                                q.difficulty.startsWith("Easy") -> Color(0xFF10b981)
+                                                                                q.difficulty.startsWith("Moderate") -> Color(0xFFf59e0b)
+                                                                                else -> Color(0xFFef4444)
+                                                                            },
+                                                                            fontSize = 12.sp)
                                                                     }
                                                                 }
                                                             }
@@ -4566,21 +4651,31 @@ fun WaveUnitsApp() {
                                                 }
                                             }
                                             item {
-                                                Text("Leaderboard", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                            }
-                                            items(a.studentLeaderboard) { s ->
-                                                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                                                    .clickable { selectedStudent = s },
+                                                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))) {
-                                                    Row(modifier = Modifier.padding(16.dp),
-                                                        verticalAlignment = Alignment.CenterVertically) {
-                                                        Text("${s.rank}.", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                                        Spacer(modifier = Modifier.width(12.dp))
-                                                        Column(modifier = Modifier.weight(1f)) {
-                                                            Text(s.name, fontWeight = FontWeight.Bold, color = Color.White)
-                                                            Text("Avg: ${"%.1f".format(s.averageScore)}% | ${s.grade}",
-                                                                color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                                    Column(modifier = Modifier.padding(16.dp)) {
+                                                        Text("Student Leaderboard",
+                                                            fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 16.sp)
+                                                        Spacer(modifier = Modifier.height(8.dp))
+                                                        a.studentLeaderboard.forEach { s ->
+                                                            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                                                                .clickable { selectedStudent = s },
+                                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
+                                                                Row(
+                                                                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                                                    verticalAlignment = Alignment.CenterVertically
+                                                                ) {
+                                                                    Text("#${s.rank}", color = Color(0xFFf59e0b), fontWeight = FontWeight.Bold)
+                                                                    Spacer(modifier = Modifier.width(12.dp))
+                                                                    Column(modifier = Modifier.weight(1f)) {
+                                                                        Text(s.name, color = Color.White, fontWeight = FontWeight.Medium)
+                                                                        Text("${"%.1f".format(s.averageScore)}%  (${s.grade})",
+                                                                            color = if (s.averageScore >= 50) Color(0xFF10b981) else Color(0xFFef4444),
+                                                                            fontSize = 12.sp)
+                                                                    }
+                                                                    Text(">", color = Color(0xFF60a5fa), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
