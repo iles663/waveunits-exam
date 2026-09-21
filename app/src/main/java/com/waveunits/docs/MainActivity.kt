@@ -398,8 +398,6 @@ fun parseAISheetToSimplified(aiAnswerSheet: String): String {
     return answers.joinToString(",")
 }
 
-// Parses a bare list of answers (e.g. "1 | B", "1:B", "1B", "1 | ?B")
-// into a number->letter map.
 fun parseBareAnswersToMap(raw: String): Map<Int, String> {
     val map = mutableMapOf<Int, String>()
     if (raw.isBlank()) return map
@@ -439,8 +437,6 @@ fun parseBareAnswersToMap(raw: String): Map<Int, String> {
     return map
 }
 
-// Merges letters from a bare answer list into the long-form key that
-// already carries the topics, so grading sees the same shape as before.
 fun mergeBareAnswersIntoLongForm(
     existingLongForm: String,
     bareAnswers: Map<Int, String>,
@@ -1198,9 +1194,6 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     }
 }
 
-// Second pass: for rows that returned "?" or blank, ask the AI again
-// with stricter "commit to a column" instructions, sending just the
-// answer-grid region of the sheet.
 private suspend fun retryUnclearRows(
     context: Context,
     uri: Uri,
@@ -1212,7 +1205,6 @@ private suspend fun retryUnclearRows(
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext emptyMap()
             val full = BitmapFactory.decodeStream(isr)
             isr.close()
-            // Crop to the lower 70% where the answer grid lives.
             val cropTop = (full.height * 0.25f).toInt()
             val cropH = full.height - cropTop
             val grid = Bitmap.createBitmap(full, 0, cropTop, full.width, cropH)
@@ -1315,15 +1307,12 @@ private fun extractPrintedStudentName(transcription: String): String? {
     return null
 }
 
-// Finds question numbers whose answer line ended in "?" or was left
-// blank in bracket format.
 private fun findUnclearNumbers(transcription: String): List<Int> {
     val body = if (transcription.contains("---SHEET---")) transcription.substringAfter("---SHEET---") else transcription
     val out = mutableListOf<Int>()
     for (line in body.lines()) {
         val t = line.trim()
         if (t.isEmpty()) continue
-        // "N | ?" or "N |" with nothing after, or "N | ?X" (already committed)
         val blankOrQ = Regex("""^(\d+)\s*\|\s*\??\s*$""").find(t)
         if (blankOrQ != null) {
             val n = blankOrQ.groupValues[1].toIntOrNull()
@@ -2973,8 +2962,6 @@ fun WaveUnitsApp() {
                                 val blanks = findUnclearNumbers(raw)
                                 if (blanks.isNotEmpty()) unclear.add(Pair(uri, blanks))
                             }
-                            // Second pass: retry the unclear rows with a
-                            // stricter column-commit prompt.
                             for ((uri, blanks) in unclear) {
                                 progressText = "Second pass on ${blanks.size} unclear rows..."
                                 val retried = retryUnclearRows(context, uri, blanks)
@@ -3011,7 +2998,8 @@ fun WaveUnitsApp() {
                             val names = mutableListOf<String>()
                             for (uri in uris) {
                                 val raw = extractNamesFromDocument(context, uri)
-                                if (raw.isBlank()) continue                                raw.lines().map { it.trim() }.filter { it.isNotBlank() }.forEach { names.add(it) }
+                                if (raw.isBlank()) continue
+                                raw.lines().map { it.trim() }.filter { it.isNotBlank() }.forEach { names.add(it) }
                             }
                             val cleaned = names.map { it.trim() }.filter { it.isNotBlank() }.distinct()
                             if (cleaned.isEmpty()) {
@@ -3045,7 +3033,6 @@ fun WaveUnitsApp() {
                             allQuestionPaperTexts = newTexts
                             allQuestionPaperImages = newImages
 
-                            // Preserve any existing answers by question number.
                             val existingAnswers = mutableMapOf<Int, String>()
                             if (aiAnswerSheet.isNotBlank()) {
                                 parseAnswerKeyToQuestions(aiAnswerSheet).forEach { q ->
@@ -3096,13 +3083,11 @@ fun WaveUnitsApp() {
                                     resolvedName = "Unknown"
                                     matched = false
                                 }
-                                // Second pass on unclear rows.
                                 val unclearNums = findUnclearNumbers(printout)
                                 if (unclearNums.isNotEmpty()) {
                                     progressText = "Second pass on ${unclearNums.size} unclear rows for $resolvedName..."
                                     val retried = retryUnclearRows(context, uri, unclearNums)
                                     if (retried.isNotEmpty()) {
-                                        // Splice the retried answers into the printout.
                                         val body = if (printout.contains("---SHEET---")) printout.substringAfter("---SHEET---") else printout
                                         val header = if (printout.contains("---SHEET---")) printout.substringBefore("---SHEET---") + "---SHEET---\n" else ""
                                         val lines = body.lines().toMutableList()
