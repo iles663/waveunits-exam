@@ -407,7 +407,7 @@ fun AnswerKeyWizard(
         Spacer(modifier = Modifier.height(12.dp))
 
         LinearProgressIndicator(
-            progress = { progress },
+            progress = progress,
             modifier = Modifier.fillMaxWidth().height(6.dp),
             color = Color(0xFF10b981),
             trackColor = Color(0xFF1e293b)
