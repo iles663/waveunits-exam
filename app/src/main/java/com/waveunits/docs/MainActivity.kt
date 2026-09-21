@@ -262,26 +262,31 @@ fun HowToUseScreen(onBack: () -> Unit) {
             "The exam becomes your workspace for that paper."
         )
         HowToSection(
-            "3. Generate blank answer sheets (optional)",
+            "3. Generate blank answer sheets",
             "Open the exam, tap 'Generate Answer Sheet (PDF)'. A4 landscape, 2 sheets per page. " +
             "Save a roster of student names under 'Set Up Class Roster', or paste names comma-separated. " +
-            "Print the PDF, cut the sheets, give them to students."
+            "Print the PDF, cut the sheets, give them to students. " +
+            "Students mark the app's sheet by writing a single letter inside the bracket. " +
+            "Do NOT use pre-printed bubble or OMR sheets — the app does not support them."
         )
         HowToSection(
             "4. Scan the question paper",
             "Tap 'Question Paper' then 'Add Question Paper'. Photograph each page of the exam paper. " +
             "The app transcribes every page (including comprehension passages and instructions) and lists " +
-            "each question's CBC strand and sub-strand. It does NOT guess answers — that is your job next."
+            "each question's CBC strand and sub-strand. It does NOT guess answers — that is your job next. " +
+            "If a question refers to a diagram, the app marks it so you know to look at the paper."
         )
         HowToSection(
-            "5. Fill in the answer key",
-            "Tap 'AI Answer Sheet'. You will see a line for each question like " +
-            "Q1: Answer: _ | Topic: Numbers -> Place value. " +
-            "Tap 'Edit', change the _ after each 'Answer:' to A, B, C or D. Do NOT touch the Topic text. " +
-            "Tap 'Save'. The app rebuilds the short-form key automatically."
+            "5. Fill in the answer key (fast)",
+            "Tap 'AI Answer Sheet', then 'Fill Answers'. One question shows at a time with four big letters A B C D. " +
+            "Tap the correct letter and the app jumps straight to the next unanswered question. " +
+            "Use '< Previous' to fix a mistake. When the progress bar is full, tap 'Save & Finish'. " +
+            "If a question refers to a diagram, a red pill warns you to check the printed paper first."
         )
         HowToSection(
             "6. Collect student answer sheets",
+            "IMPORTANT: use the app's own printed answer sheets (see step 3), NOT pre-printed bubble/OMR sheets. " +
+            "The app cannot read shaded OMR ovals reliably from a phone photo. " +
             "Tap 'Collected Sheets' then 'Add Answer Sheets'. Photograph each student's completed sheet. " +
             "The app reads the printed NAME at the top of each sheet. If a name is unreadable it will ask you to type it."
         )
@@ -304,8 +309,9 @@ fun HowToUseScreen(onBack: () -> Unit) {
         )
         HowToSection(
             "10. Changing your key after grading",
-            "If you realise a question's correct answer was wrong, open 'AI Answer Sheet', tap 'Edit', fix the letter, " +
-            "tap 'Save'. The app offers to re-grade on the spot. Say yes and every sheet is re-scored against the new key."
+            "If you realise a question's correct answer was wrong, open 'AI Answer Sheet', tap 'Fill Answers' again, " +
+            "tap the correct letter, then 'Save & Finish'. The app offers to re-grade on the spot. " +
+            "Say yes and every sheet is re-scored against the new key."
         )
         HowToSection(
             "Tips",
@@ -323,6 +329,210 @@ private fun HowToSection(title: String, body: String) {
     Spacer(modifier = Modifier.height(4.dp))
     Text(body, color = Color.White, fontSize = 13.sp)
     Spacer(modifier = Modifier.height(16.dp))
+}
+
+// ===== ANSWER KEY WIZARD =====
+@Composable
+fun AnswerKeyWizard(
+    questions: List<QuestionData>,
+    initialAnswers: Map<Int, String>,
+    diagramQuestions: Set<Int>,
+    onFinish: (String) -> Unit,
+    onCancel: () -> Unit
+) {
+    if (questions.isEmpty()) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text("No questions found. Scan the question paper first.",
+                color = Color(0xFF94a3b8), fontSize = 14.sp)
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(
+                onClick = onCancel,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+            ) { Text("Back", maxLines = 1) }
+        }
+        return
+    }
+
+    val answers = remember { mutableStateMapOf<Int, String>() }
+    LaunchedEffect(questions) {
+        answers.clear()
+        initialAnswers.forEach { (k, v) -> if (v.isNotBlank()) answers[k] = v }
+    }
+
+    val sortedNumbers = remember(questions) { questions.map { it.number }.sorted() }
+
+    fun firstUnansweredFrom(startNumber: Int): Int {
+        val idx = sortedNumbers.indexOf(startNumber)
+        if (idx < 0) return sortedNumbers.first()
+        for (i in idx until sortedNumbers.size) {
+            val n = sortedNumbers[i]
+            if (answers[n].isNullOrBlank()) return n
+        }
+        for (i in 0 until idx) {
+            val n = sortedNumbers[i]
+            if (answers[n].isNullOrBlank()) return n
+        }
+        return sortedNumbers.last()
+    }
+
+    var currentNumber by remember { mutableStateOf(firstUnansweredFrom(sortedNumbers.first())) }
+    val currentQ = questions.find { it.number == currentNumber }
+    val answeredCount = answers.count { !it.value.isNullOrBlank() }
+    val totalCount = sortedNumbers.size
+    val progress = if (totalCount > 0) answeredCount.toFloat() / totalCount else 0f
+
+    fun commit(letter: String) {
+        answers[currentNumber] = letter
+        val next = firstUnansweredFrom(currentNumber)
+        currentNumber = next
+    }
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Button(
+                onClick = onCancel,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569)),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+            ) { Text("Back", fontSize = 12.sp, maxLines = 1) }
+            Spacer(modifier = Modifier.weight(1f))
+            Text("$answeredCount / $totalCount answered",
+                color = if (answeredCount == totalCount) Color(0xFF10b981) else Color(0xFFf59e0b),
+                fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        LinearProgressIndicator(
+            progress = { progress },
+            modifier = Modifier.fillMaxWidth().height(6.dp),
+            color = Color(0xFF10b981),
+            trackColor = Color(0xFF1e293b)
+        )
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        Text("Question", color = Color(0xFF94a3b8), fontSize = 12.sp)
+        Text("Q$currentNumber", color = Color.White, fontSize = 44.sp, fontWeight = FontWeight.Bold)
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1e293b))
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text("Topic", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                Text(currentQ?.topic ?: "General", color = Color(0xFF60a5fa), fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                val sub = currentQ?.subTopic ?: ""
+                if (sub.isNotBlank() && sub != "General") {
+                    Text("Sub-topic: $sub", color = Color(0xFF64748b), fontSize = 11.sp)
+                }
+            }
+        }
+
+        if (diagramQuestions.contains(currentNumber)) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF7f1d1d))
+            ) {
+                Text("? This question refers to a diagram. Check the printed paper.",
+                    color = Color.White, fontSize = 12.sp,
+                    modifier = Modifier.padding(10.dp))
+            }
+        }
+
+        val existing = answers[currentNumber]
+        if (!existing.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("Current answer: $existing  (tap another letter to change)",
+                color = Color(0xFF10b981), fontSize = 12.sp)
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Text("Tap the correct letter", color = Color(0xFF94a3b8), fontSize = 12.sp)
+        Spacer(modifier = Modifier.height(10.dp))
+
+        val letters = listOf("A", "B", "C", "D")
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            letters.forEach { L ->
+                val selected = existing == L
+                Button(
+                    onClick = { commit(L) },
+                    modifier = Modifier.weight(1f).height(72.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (selected) Color(0xFF10b981) else Color(0xFF2563eb)
+                    )
+                ) { Text(L, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = {
+                    val idx = sortedNumbers.indexOf(currentNumber)
+                    if (idx > 0) currentNumber = sortedNumbers[idx - 1]
+                },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569)),
+                enabled = sortedNumbers.indexOf(currentNumber) > 0
+            ) { Text("< Previous", fontSize = 12.sp, maxLines = 1) }
+
+            Button(
+                onClick = {
+                    val idx = sortedNumbers.indexOf(currentNumber)
+                    if (idx < sortedNumbers.size - 1) {
+                        currentNumber = sortedNumbers[idx + 1]
+                    }
+                },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569)),
+                enabled = sortedNumbers.indexOf(currentNumber) < sortedNumbers.size - 1
+            ) { Text("Skip >", fontSize = 12.sp, maxLines = 1) }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Button(
+            onClick = { answers.remove(currentNumber) },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7f1d1d))
+        ) { Text("Clear this answer", fontSize = 12.sp, maxLines = 1) }
+
+        Spacer(modifier = Modifier.weight(1f))
+
+        Button(
+            onClick = {
+                val built = sortedNumbers.joinToString("\n") { n ->
+                    val q = questions.find { it.number == n }
+                    val ans = answers[n]?.takeIf { it.isNotBlank() } ?: "_"
+                    "Q$n: Answer: $ans | Topic: ${q?.topic ?: "General"}"
+                }
+                onFinish(built)
+            },
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+        ) {
+            Text(
+                if (answeredCount == totalCount) "Save & Finish ($totalCount/$totalCount)"
+                else "Save & Finish ($answeredCount/$totalCount answered)",
+                fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1
+            )
+        }
+    }
 }
 
 // ===== UTILITY FUNCTIONS =====
@@ -867,7 +1077,6 @@ private fun drawMarkedSlice(
     if (sheet == null) return
 
     val padX = mm(4f)
-    val yTopPad = mm(2f)
     val yMetaBaseline = mm(5f)
     val yMetaDivider = mm(6.5f)
     val yNameBaseline = mm(10.5f)
@@ -1056,7 +1265,10 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
                   - If a number has no letter, output it blank: 14 |
                   - Preserve number order.
 
-                FORMAT C — Bubble sheet. Output the letter of the filled oval.
+                (Pre-printed OMR / bubble sheets are NOT supported. If
+                the page is a bubble sheet with shaded ovals, output
+                exactly: ERR: unsupported bubble sheet — use the app's
+                printed answer sheet.)
 
                 FORMAT D — Any other layout. Infer the answer per question
                 number and output: <number> | <letter>
@@ -1352,7 +1564,7 @@ private suspend fun parseQuestionsWithTopics(rawText: String): List<QuestionData
             val body = JSONObject()
                 .put("model", "gpt-5.6-luna")
                 .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
-                .put("max_completion_tokens", 6000)
+                .put("max_completion_tokens", 8000)
                 .toString()
             val req = Request.Builder()
                 .url("https://api.openai.com/v1/chat/completions")
@@ -1385,65 +1597,99 @@ private suspend fun extractTextFromImage(context: Context, uri: Uri): String {
     return withContext(Dispatchers.IO) {
         try {
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext ""
-            val bmp = BitmapFactory.decodeStream(isr)
+            val fullBmp = BitmapFactory.decodeStream(isr)
             isr.close()
-            val scaled = Bitmap.createScaledBitmap(bmp, 1200, 1700, true)
-            val baos = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 85, baos)
-            val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
-            val client = OkHttpClient.Builder()
-                .connectTimeout(60, TimeUnit.SECONDS)
-                .readTimeout(300, TimeUnit.SECONDS)
-                .writeTimeout(60, TimeUnit.SECONDS)
-                .build()
-            val prompt = """
-                Transcribe EVERYTHING visible on this exam paper page,
-                top to bottom, left to right, word for word. Do NOT
-                summarise and do NOT skip any part.
 
-                You MUST include:
-                - The exam header (school, subject, grade, term, date, time).
-                - Instructions to candidates.
-                - Comprehension passages, cloze passages, poems, dialogue
-                  extracts, and any other reading material. Copy them in
-                  full, exactly as printed, even if long.
-                - Every question number and its full wording, including
-                  sub-questions labelled (a), (b), (c) and roman numerals.
-                - Multiple choice options A, B, C, D.
-                - Table contents, lists, and bullet points.
-                - Captions and labels that appear under diagrams or
-                  pictures. If a diagram has no text, write
-                  [diagram without text] on its own line.
-                - Marks shown in brackets, e.g. (2 marks).
+            val topHalf = Bitmap.createBitmap(fullBmp, 0, 0, fullBmp.width, fullBmp.height / 2)
+            val bottomHalf = Bitmap.createBitmap(fullBmp, 0, fullBmp.height / 2, fullBmp.width, fullBmp.height - fullBmp.height / 2)
 
-                Preserve line breaks where the paper uses them. If a word
-                is genuinely unreadable, write [unclear].
+            val topText = transcribeExamChunk(context, topHalf, "TOP HALF")
+            val bottomText = transcribeExamChunk(context, bottomHalf, "BOTTOM HALF")
 
-                Do not answer any question. Do not translate. Just
-                transcribe.
-            """.trimIndent()
-            val content = JSONArray()
-                .put(JSONObject().put("type", "text").put("text", prompt))
-                .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$b64")))
-            val body = JSONObject()
-                .put("model", "gpt-5.6-luna")
-                .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
-                .put("max_completion_tokens", 6000)
-                .toString()
-            val req = Request.Builder()
-                .url("https://api.openai.com/v1/chat/completions")
-                .post(body.toRequestBody("application/json".toMediaType()))
-                .addHeader("Authorization", "Bearer $OPENAI_API_KEY")
-                .build()
-            client.newCall(req).execute().use { res ->
-                val js = res.body?.string() ?: return@use ""
-                if (!res.isSuccessful) return@use "HTTP ${res.code}"
-                try {
-                    JSONObject(js).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
-                } catch (e: Exception) { "" }
+            val combined = buildString {
+                if (topText.isNotBlank()) append(topText.trim())
+                if (topText.isNotBlank() && bottomText.isNotBlank()) append("\n\n")
+                if (bottomText.isNotBlank()) append(bottomText.trim())
             }
+            combined
         } catch (e: Exception) { "" }
     }
+}
+
+private suspend fun transcribeExamChunk(context: Context, bmp: Bitmap, label: String): String {
+    return try {
+        val scaled = Bitmap.createScaledBitmap(bmp, 1400, 2000, true)
+        val baos = ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, 88, baos)
+        val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
+
+        val client = OkHttpClient.Builder()
+            .connectTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(300, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .build()
+
+        val prompt = """
+            You are transcribing ONE CHUNK of a Kenyan CBC exam paper page.
+            This chunk is the $label of a page.
+
+            FIRST: Look at the layout of this chunk.
+
+            CASE A — There is a reading passage, story, poem, dialogue,
+            or comprehension text anywhere on this chunk:
+              STEP 1. Transcribe that passage FIRST, in full, word for
+                      word, from its first word to its last, in the order
+                      it reads. Do not stop early. Do not summarise.
+                      Do not skip sentences because they look unimportant.
+              STEP 2. Then transcribe every question on the chunk.
+                      Prefix the passage with the line:
+                      ===PASSAGE===
+                      and prefix the questions with the line:
+                      ===QUESTIONS===
+
+            CASE B — There is no passage, only questions:
+              Transcribe every question in order.
+
+            RULES THAT APPLY TO EVERYTHING:
+            - Preserve question numbers, sub-numbers like (a), (b), (i),
+              (ii), and lettered options A, B, C, D on separate lines.
+            - Copy instructions to candidates in full.
+            - If you see a drawing, diagram, chart, picture or map:
+                * Transcribe any CAPTION or LABEL printed under or beside it.
+                * If the question refers to the diagram (e.g. "look at the
+                  diagram", "the part labelled X", "the figure below"),
+                  write [DIAGRAM PRESENT] on its own line right after the
+                  question so the teacher knows a visual is there.
+                * Do NOT try to interpret the diagram. Do NOT invent
+                  labels that are not printed.
+            - If a word is genuinely unreadable, write [unclear].
+            - Do not answer questions. Do not translate.
+            - Do not add commentary of your own.
+            - If the chunk is blank or has no text, return an empty string.
+        """.trimIndent()
+
+        val content = JSONArray()
+            .put(JSONObject().put("type", "text").put("text", prompt))
+            .put(JSONObject().put("type", "image_url")
+                .put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$b64")))
+        val body = JSONObject()
+            .put("model", "gpt-5.6-luna")
+            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
+            .put("max_completion_tokens", 8000)
+            .toString()
+        val req = Request.Builder()
+            .url("https://api.openai.com/v1/chat/completions")
+            .post(body.toRequestBody("application/json".toMediaType()))
+            .addHeader("Authorization", "Bearer $OPENAI_API_KEY")
+            .build()
+        client.newCall(req).execute().use { res ->
+            val js = res.body?.string() ?: return ""
+            if (!res.isSuccessful) return ""
+            try {
+                JSONObject(js).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content").trim()
+            } catch (e: Exception) { "" }
+        }
+    } catch (e: Exception) { "" }
 }
 
 private suspend fun imageToBase64(context: Context, uri: Uri): String {
@@ -1564,6 +1810,7 @@ fun WaveUnitsApp() {
 
     var isEditingAnswerKey by remember { mutableStateOf(false) }
     var editableKeyText by remember { mutableStateOf("") }
+    var isWizardOpen by remember { mutableStateOf(false) }
     var showRegradePromptAfterSave by remember { mutableStateOf(false) }
     var showRegradeConfirm by remember { mutableStateOf(false) }
 
@@ -1617,6 +1864,7 @@ fun WaveUnitsApp() {
         lastSeenPrintedName = null
         isEditingAnswerKey = false
         editableKeyText = ""
+        isWizardOpen = false
         currentView = "home"
     }
 
@@ -2589,7 +2837,6 @@ fun WaveUnitsApp() {
                             allQuestionPaperTexts = newTexts
                             allQuestionPaperImages = newImages
 
-                            // Topics only. Teacher fills the answers.
                             val newLongForm = newQs.joinToString("\n") { q ->
                                 "Q${q.number}: Answer: _ | Topic: ${q.topic}"
                             }
@@ -3665,7 +3912,7 @@ fun WaveUnitsApp() {
                                     !sectionState.isCollectedSheetsOpen &&
                                     !sectionState.isPrintableReportOpen && !sectionState.isRosterSetupOpen &&
                                     !sectionState.isSavedRostersOpen && !sectionState.isAnswerSheetGeneratorOpen &&
-                                    !sectionState.isHowToUseOpen
+                                    !sectionState.isHowToUseOpen && !isWizardOpen
                                 if (nothingOpen) {
                                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                         Button(
@@ -4293,112 +4540,135 @@ fun WaveUnitsApp() {
                                         }
                                     }
                                 } else if (sectionState.isAIAnswerSheetOpen) {
-                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                        item {
-                                            Button(onClick = {
+                                    if (isWizardOpen) {
+                                        val initial = extractedQuestions.associate { it.number to it.correctAnswer }
+                                        val diagramQs = remember(questionPaperText) {
+                                            val set = mutableSetOf<Int>()
+                                            if (questionPaperText.isNotBlank()) {
+                                                val lines = questionPaperText.lines()
+                                                var lastQ: Int? = null
+                                                for (line in lines) {
+                                                    val qMatch = Regex("""^\s*(\d+)\s*[.)]""").find(line)
+                                                    if (qMatch != null) lastQ = qMatch.groupValues[1].toIntOrNull()
+                                                    if (line.contains("[DIAGRAM PRESENT]", ignoreCase = true) && lastQ != null) {
+                                                        set.add(lastQ!!)
+                                                    }
+                                                }
+                                            }
+                                            set
+                                        }
+                                        AnswerKeyWizard(
+                                            questions = extractedQuestions,
+                                            initialAnswers = initial,
+                                            diagramQuestions = diagramQs,
+                                            onFinish = { built ->
+                                                editableKeyText = built
+                                                isWizardOpen = false
+                                                saveEditedAnswerKey(built)
                                                 sectionState = sectionState.copy(isAIAnswerSheetOpen = false)
-                                                isEditingAnswerKey = false
-                                                editableKeyText = ""
                                             },
-                                                modifier = Modifier.fillMaxWidth(),
-                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
-                                            ) { Text("Back", maxLines = 1) }
-                                            Spacer(modifier = Modifier.height(8.dp))
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Text("Answer Key", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
-                                                Spacer(modifier = Modifier.weight(1f))
-                                                if (!isEditingAnswerKey) {
+                                            onCancel = { isWizardOpen = false }
+                                        )
+                                    } else {
+                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                            item {
+                                                Button(onClick = {
+                                                    sectionState = sectionState.copy(isAIAnswerSheetOpen = false)
+                                                    isEditingAnswerKey = false
+                                                    editableKeyText = ""
+                                                },
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                                ) { Text("Back", maxLines = 1) }
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text("Answer Key", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
+                                                    Spacer(modifier = Modifier.weight(1f))
+                                                    if (extractedQuestions.isNotEmpty()) {
+                                                        Button(
+                                                            onClick = { isWizardOpen = true },
+                                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b)),
+                                                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                                                        ) { Text("Fill Answers", fontSize = 12.sp, maxLines = 1) }
+                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                    }
                                                     Button(
                                                         onClick = {
                                                             editableKeyText = aiAnswerSheet
-                                                            isEditingAnswerKey = true
+                                                            isEditingAnswerKey = !isEditingAnswerKey
                                                         },
-                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b)),
-                                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
-                                                    ) { Text("Edit", fontSize = 12.sp, maxLines = 1) }
+                                                        colors = ButtonDefaults.buttonColors(
+                                                            containerColor = if (isEditingAnswerKey) Color(0xFF7f1d1d) else Color(0xFF475569)
+                                                        ),
+                                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                                    ) { Text(if (isEditingAnswerKey) "Close text" else "Raw text", fontSize = 11.sp, maxLines = 1) }
+                                                }
+                                                Spacer(modifier = Modifier.height(12.dp))
+
+                                                if (extractedQuestions.isEmpty()) {
+                                                    Text("No questions yet. Scan the question paper first.",
+                                                        color = Color(0xFF94a3b8), fontSize = 13.sp)
+                                                } else if (!isEditingAnswerKey) {
+                                                    val totalQs = extractedQuestions.size
+                                                    val answeredQs = extractedQuestions.count { it.correctAnswer.isNotBlank() }
+                                                    Text("$answeredQs of $totalQs questions answered",
+                                                        color = if (answeredQs == totalQs && totalQs > 0) Color(0xFF10b981) else Color(0xFFf59e0b),
+                                                        fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                                    Spacer(modifier = Modifier.height(6.dp))
+                                                    Text("Tap 'Fill Answers' to answer each question with one tap. The app moves to the next automatically.",
+                                                        color = Color(0xFF94a3b8), fontSize = 11.sp)
+
+                                                    if (questionPaperText.contains("[DIAGRAM PRESENT]", ignoreCase = true)) {
+                                                        Spacer(modifier = Modifier.height(8.dp))
+                                                        Card(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF7f1d1d))
+                                                        ) {
+                                                            Column(modifier = Modifier.padding(10.dp)) {
+                                                                Text("Paper has diagrams", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                                                Text("Some questions refer to pictures. Keep the original paper nearby.",
+                                                                    color = Color.White, fontSize = 11.sp)
+                                                            }
+                                                        }
+                                                    }
+
+                                                    Spacer(modifier = Modifier.height(12.dp))
+                                                    Text("Answer Key (long form):", fontWeight = FontWeight.Bold, color = Color(0xFF10b981), fontSize = 13.sp)
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    if (aiAnswerSheet.isBlank()) {
+                                                        Text("Nothing yet.", color = Color(0xFF94a3b8), fontSize = 12.sp)
+                                                    } else {
+                                                        Text(aiAnswerSheet, color = Color.White, fontSize = 12.sp)
+                                                    }
+                                                    if (simplifiedAnswerKey.isNotBlank()) {
+                                                        Spacer(modifier = Modifier.height(12.dp))
+                                                        Text("Simplified Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b), fontSize = 13.sp)
+                                                        Text(simplifiedAnswerKey, color = Color.White, fontSize = 12.sp)
+                                                    }
                                                 } else {
+                                                    Text("Raw text editor. Use this only to fix odd lines.",
+                                                        color = Color(0xFFf59e0b), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    OutlinedTextField(
+                                                        value = editableKeyText,
+                                                        onValueChange = { editableKeyText = it },
+                                                        label = { Text("Answer Key (long form)") },
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        minLines = 8,
+                                                        maxLines = 30
+                                                    )
+                                                    Spacer(modifier = Modifier.height(8.dp))
                                                     Button(
                                                         onClick = {
                                                             saveEditedAnswerKey(editableKeyText)
                                                             isEditingAnswerKey = false
                                                         },
-                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981)),
-                                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
-                                                    ) { Text("Save", fontSize = 12.sp, maxLines = 1) }
-                                                    Spacer(modifier = Modifier.width(6.dp))
-                                                    Button(
-                                                        onClick = {
-                                                            isEditingAnswerKey = false
-                                                            editableKeyText = ""
-                                                        },
-                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7f1d1d)),
-                                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
-                                                    ) { Text("Cancel", fontSize = 12.sp, maxLines = 1) }
-                                                }
-                                            }
-                                            Spacer(modifier = Modifier.height(12.dp))
-
-                                            if (isEditingAnswerKey) {
-                                                Text("Fill in the letter after each 'Answer:'. Keep the Topic text as is.",
-                                                    fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b), fontSize = 13.sp)
-                                                Text("Q1: Answer: B | Topic: Life of Prophets -> Parables", color = Color(0xFF94a3b8), fontSize = 11.sp)
-                                                Text("Any question left as Answer: _ is skipped at grading.",
-                                                    color = Color(0xFF94a3b8), fontSize = 11.sp)
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                OutlinedTextField(
-                                                    value = editableKeyText,
-                                                    onValueChange = { editableKeyText = it },
-                                                    label = { Text("Answer Key (long form)") },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    minLines = 6,
-                                                    maxLines = 20
-                                                )
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Card(modifier = Modifier.fillMaxWidth(),
-                                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))) {
-                                                    Column(modifier = Modifier.padding(12.dp)) {
-                                                        Text("Preview (parsed):", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 13.sp)
-                                                        Spacer(modifier = Modifier.height(4.dp))
-                                                        val previewQs = parseAnswerKeyToQuestions(editableKeyText)
-                                                        if (previewQs.isEmpty()) {
-                                                            Text("No questions parsed. Check the format.", color = Color(0xFFef4444), fontSize = 12.sp)
-                                                        } else {
-                                                            val answered = previewQs.count { it.correctAnswer.isNotBlank() }
-                                                            Text("${previewQs.size} question(s), $answered answered",
-                                                                color = Color(0xFF10b981), fontSize = 12.sp)
-                                                            Spacer(modifier = Modifier.height(4.dp))
-                                                            previewQs.take(20).forEach { q ->
-                                                                val mark = if (q.correctAnswer.isBlank()) "_" else q.correctAnswer
-                                                                Text("Q${q.number}: $mark  (${q.topic})", color = Color.White, fontSize = 11.sp)
-                                                            }
-                                                            if (previewQs.size > 20) {
-                                                                Text("… ${previewQs.size - 20} more", color = Color(0xFF94a3b8), fontSize = 11.sp)
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            } else {
-                                                if (aiAnswerSheet.isNotBlank()) {
-                                                    Text("Answer Key (with topics):", fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
-                                                    Spacer(modifier = Modifier.height(4.dp))
-                                                    val totalQs = extractedQuestions.size
-                                                    val answeredQs = extractedQuestions.count { it.correctAnswer.isNotBlank() }
-                                                    Text("$answeredQs of $totalQs questions answered",
-                                                        color = if (answeredQs == totalQs && totalQs > 0) Color(0xFF10b981) else Color(0xFFf59e0b),
-                                                        fontSize = 12.sp)
-                                                    Spacer(modifier = Modifier.height(8.dp))
-                                                    Text(aiAnswerSheet, color = Color.White, fontSize = 12.sp)
-                                                } else {
-                                                    Text("No answer key yet. Scan the question paper first, then come back to fill in the answers.",
-                                                        color = Color(0xFF94a3b8), fontSize = 13.sp)
-                                                }
-                                                if (simplifiedAnswerKey.isNotBlank()) {
-                                                    Spacer(modifier = Modifier.height(12.dp))
-                                                    Text("Simplified Key:", fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                                    Text(simplifiedAnswerKey, color = Color.White, fontSize = 12.sp)
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
+                                                    ) { Text("Save", maxLines = 1) }
                                                 }
                                             }
                                         }
