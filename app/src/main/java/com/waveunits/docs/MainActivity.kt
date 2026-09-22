@@ -264,8 +264,10 @@ fun HowToUseScreen(onBack: () -> Unit) {
         HowToSection(
             "3. Generate blank answer sheets",
             "Open the exam, tap 'Generate Answer Sheet (PDF)'. A4 landscape, 2 sheets per page. " +
-            "Save a roster of student names under 'Set Up Class Roster', or paste names comma-separated, " +
-            "or scan a document (class list, register, fee statement) and the app picks out the names. " +
+            "The FIRST sheet on the printed page is the TEACHER KEY sheet — cut it off and keep it for yourself. " +
+            "The rest are student sheets. " +
+            "Load a roster of student names under 'Set Up Class Roster': pick a .txt or .pdf class register, " +
+            "or paste names comma-separated, or photograph a printed list. " +
             "Print the PDF, cut the sheets, give them to students. " +
             "Students mark the app's sheet by writing a single letter inside the bracket. " +
             "Do NOT use pre-printed bubble or OMR sheets — the app does not support them."
@@ -321,7 +323,7 @@ fun HowToUseScreen(onBack: () -> Unit) {
             "- Write answers on the printed sheet inside the [ ] brackets; one letter per row.\n" +
             "- If the scanner fails on a page, delete the exam's collected sheets and re-add that page only.\n" +
             "- The answer key is long-form. Never delete the Topic part — it is what powers topic analytics.\n" +
-            "- For rosters, any document with a list of names works — class list, register, fee statement. The app picks out just the names."
+            "- For rosters, a .txt or .pdf class register loads instantly. Photos work too."
         )
     }
 }
@@ -533,7 +535,9 @@ fun buildAnswerSheetPdf(
     studentNames: List<String>,
     filenameBase: String
 ): String? {
-    val names = if (studentNames.isEmpty()) listOf("") else studentNames
+    // The very first slice is always the teacher's key sheet.
+    val teacherLabel = "TEACHER KEY"
+    val names = listOf(teacherLabel) + studentNames
     val cappedCount = if (questionCount > 50) 50 else questionCount
     val leftCount = if (cappedCount <= 25) cappedCount else 25
     val rightCount = if (cappedCount <= 25) 0 else cappedCount - 25
@@ -802,7 +806,7 @@ private fun drawAnswerSheetSlice(
 
             val numText = q.toString()
             val numWidth = rowNumPaint.measureText(numText)
-            canvas.drawText(numText, halfStartX + noColW - mm(1.5f) - numWidth, baseline, rowNumPaint)
+            canvas.drawText(numText, halfStartX + noColW - mm(3.5f) - numWidth, baseline, rowNumPaint)
 
             for (bi in 0..3) {
                 val xStart = halfStartX + noColW + bracketColW * bi
@@ -1859,6 +1863,102 @@ private suspend fun imageToBase64(context: Context, uri: Uri): String {
             Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
         } catch (e: Exception) { "" }
     }
+}
+
+// ===== ROSTER FILE HELPERS =====
+// Reads a plain-text file and returns its raw content.
+private suspend fun readTextFile(context: Context, uri: Uri): String {
+    return withContext(Dispatchers.IO) {
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                input.bufferedReader().readText()
+            } ?: ""
+        } catch (e: Exception) { "" }
+    }
+}
+
+// Copies an InputStream into a cache file and returns it.
+private fun copyToCache(context: Context, input: java.io.InputStream, name: String): File {
+    val f = File(context.cacheDir, name)
+    FileOutputStream(f).use { outStream -> input.copyTo(outStream) }
+    return f
+}
+
+// Renders every page of a PDF to a JPEG and sends each page to the
+// existing AI name-extraction function.
+private suspend fun extractNamesFromPdfViaAi(context: Context, uri: Uri): List<String> {
+    return withContext(Dispatchers.IO) {
+        try {
+            val isr = context.contentResolver.openInputStream(uri) ?: return@withContext emptyList()
+            val cachedPdf = copyToCache(context, isr, "roster_scan.pdf")
+            isr.close()
+            val pfd = ParcelFileDescriptor.open(cachedPdf, ParcelFileDescriptor.MODE_READ_ONLY)
+            val renderer = PdfRenderer(pfd)
+            val out = mutableListOf<String>()
+            for (i in 0 until renderer.pageCount) {
+                val page = renderer.openPage(i)
+                val bmp = Bitmap.createBitmap(page.width * 2, page.height * 2, Bitmap.Config.ARGB_8888)
+                bmp.eraseColor(AndroidColor.WHITE)
+                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                page.close()
+                val pageFile = File(context.cacheDir, "roster_page_$i.jpg")
+                FileOutputStream(pageFile).use { outStream ->
+                    bmp.compress(Bitmap.CompressFormat.JPEG, 88, outStream)
+                }
+                val pageUri = androidx.core.content.FileProvider.getUriForFile(
+                    context,
+                    context.packageName + ".fileprovider",
+                    pageFile
+                )
+                val raw = extractNamesFromDocument(context, pageUri)
+                raw.lines().map { it.trim() }.filter { it.isNotBlank() }.forEach { out.add(it) }
+                try { pageFile.delete() } catch (_: Exception) {}
+            }
+            renderer.close()
+            pfd.close()
+            try { cachedPdf.delete() } catch (_: Exception) {}
+            out
+        } catch (e: Exception) { emptyList() }
+    }
+}
+
+// Cleans raw text into a name list: removes numbering, headers,
+// money amounts, empty lines. Used for TXT files.
+private fun cleanNamesFromText(raw: String): List<String> {
+    if (raw.isBlank()) return emptyList()
+    val out = mutableListOf<String>()
+    val numberPrefix = Regex("""^\s*(\d{1,3})\s*[.)\-:]?\s+""")
+    val headerWords = setOf(
+        "name", "names", "no", "s/no", "sno", "index", "adm", "admission",
+        "class", "grade", "stream", "student", "students", "total", "page",
+        "signature", "position", "marks", "score", "remarks", "contacts",
+        "phone", "tel", "kcpe", "registration", "reg"
+    )
+    val skipLineWords = setOf(
+        "class list", "student list", "register", "attendance",
+        "school", "term", "year", "date", "teacher"
+    )
+    for (line in raw.lines()) {
+        var t = line.trim()
+        if (t.isEmpty()) continue
+        t = numberPrefix.replaceFirst(t, "").trim()
+        if (t.isEmpty()) continue
+        val chunked = t.split(Regex("""\t|\||\s{3,}"""))
+        val candidate = chunked.firstOrNull()?.trim() ?: continue
+        if (candidate.isEmpty()) continue
+        val lower = candidate.lowercase()
+        if (headerWords.contains(lower)) continue
+        if (skipLineWords.any { lower == it || lower.startsWith("$it ") }) continue
+        if (candidate.any { it.isDigit() }) continue
+        if (candidate.contains("@") || candidate.contains("http")) continue
+        if (candidate.count { it.isLetter() } < 2) continue
+        val normalised = candidate.replace(Regex("""\s+"""), " ").trim()
+        val pretty = normalised.split(" ").joinToString(" ") { w ->
+            if (w.isEmpty()) w else w[0].uppercase() + w.drop(1).lowercase()
+        }
+        out.add(pretty)
+    }
+    return out.distinct()
 }
 
 // ===== MAIN COMPOSABLE =====
@@ -2933,6 +3033,45 @@ fun WaveUnitsApp() {
                 Toast.makeText(context, "Renamed to $newName", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Toast.makeText(context, "Rename error: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val rosterFilePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            try {
+                isExtracting = true
+                progressText = "Reading roster file..."
+                val mime = context.contentResolver.getType(uri) ?: ""
+                val lower = uri.toString().lowercase()
+
+                val names: List<String> = when {
+                    mime.startsWith("text/") || lower.endsWith(".txt") -> {
+                        val raw = readTextFile(context, uri)
+                        cleanNamesFromText(raw)
+                    }
+                    mime == "application/pdf" || lower.endsWith(".pdf") -> {
+                        progressText = "Reading PDF pages..."
+                        extractNamesFromPdfViaAi(context, uri)
+                    }
+                    else -> emptyList()
+                }
+
+                if (names.isEmpty()) {
+                    Toast.makeText(context, "No names found in that file.", Toast.LENGTH_LONG).show()
+                } else {
+                    rosterNames = names
+                    rosterInput = names.joinToString(", ")
+                    Toast.makeText(context, "Loaded ${names.size} names from file.", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "File read error: ${e.message}", Toast.LENGTH_LONG).show()
+            } finally {
+                isExtracting = false
+                progressText = ""
             }
         }
     }
@@ -4285,7 +4424,7 @@ fun WaveUnitsApp() {
                                             ) { Text("Back", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text("Generate Answer Sheets (PDF)", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFf59e0b))
-                                            Text("A4 landscape, 2 sheets per page. Each sheet has 2 columns of questions.", color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                            Text("A4 landscape, 2 sheets per page. First sheet is TEACHER KEY, then students.", color = Color(0xFF94a3b8), fontSize = 11.sp)
                                             Spacer(modifier = Modifier.height(12.dp))
 
                                             OutlinedTextField(value = genSchool, onValueChange = { genSchool = it },
@@ -4412,8 +4551,9 @@ fun WaveUnitsApp() {
                                                         if (path != null) {
                                                             lastGeneratedPdfPath = path
                                                             pdfPreviewBitmap = renderPdfFirstPage(path)
-                                                            val pages = (rosterNames.size + 1) / 2
-                                                            Toast.makeText(context, "Saved ${rosterNames.size} sheets ($pages pages) to: $path", Toast.LENGTH_LONG).show()
+                                                            val totalSlices = rosterNames.size + 1
+                                                            val pages = (totalSlices + 1) / 2
+                                                            Toast.makeText(context, "Saved ${rosterNames.size} students + 1 teacher sheet ($pages pages) to: $path", Toast.LENGTH_LONG).show()
                                                         }
                                                     }
                                                 },
@@ -4469,12 +4609,23 @@ fun WaveUnitsApp() {
                                                 color = Color(0xFF94a3b8), fontSize = 11.sp)
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Button(
-                                                onClick = { launchScan("roster_document") },
+                                                onClick = {
+                                                    rosterFilePicker.launch(arrayOf("text/plain", "application/pdf"))
+                                                },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFf59e0b))
-                                            ) { Text("Load Names From Document (scan)", maxLines = 1) }
+                                            ) { Text("Load Names From File (.txt / .pdf)", maxLines = 1) }
                                             Spacer(modifier = Modifier.height(6.dp))
-                                            Text("Photograph any document that has a list of names (class list, register, fee statement). The app picks out just the names.",
+                                            Text("Pick a class register or list saved as .txt or .pdf. TXT is read instantly. PDF pages are read by AI.",
+                                                color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Button(
+                                                onClick = { launchScan("roster_document") },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF60a5fa))
+                                            ) { Text("Or Load Names From a Photo (scan)", maxLines = 1) }
+                                            Spacer(modifier = Modifier.height(6.dp))
+                                            Text("Photograph a printed class list. The app picks out just the names.",
                                                 color = Color(0xFF94a3b8), fontSize = 11.sp)
                                             Spacer(modifier = Modifier.height(10.dp))
                                             OutlinedTextField(value = rosterInput, onValueChange = { rosterInput = it },
