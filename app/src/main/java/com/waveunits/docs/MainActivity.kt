@@ -1170,6 +1170,13 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
                 FORMAT D — any other layout. Still produce one line per
                 question number in the shape <number> | <letter>.
 
+                STOPPING RULE:
+                Only output rows that are ACTUALLY PRINTED on the sheet.
+                Stop at the last printed question number. If the sheet
+                ends at 30, do not output 31 or any higher number. Do
+                not continue a pattern. Do not assume the form runs to
+                50. If there is no row for a number, do not output it.
+
                 STEP 3 — Below the ---SHEET--- line, output ONLY the
                 answer lines. No commentary. No headings. No summary.
             """.trimIndent()
@@ -1241,20 +1248,48 @@ private suspend fun transcribeBubbleSheet(context: Context, uri: Uri): String {
 
                 STEP 2 — Read the bubble grid.
 
-                For each question number row, look at the four ovals in
-                that row, in this fixed order left to right:
-                  A oval | B oval | C oval | D oval
+                For each question number row, there are FOUR ovals.
+                Count them by POSITION, not by the letter you think
+                is inside them. Label them in your head like this:
 
-                Exactly one oval SHOULD be filled. Determine which one by
-                looking for the oval that is darker, more shaded, more
-                solid, or has more ink/pencil marks inside it than the
-                other three ovals in the same row.
+                  oval #1 (leftmost)  -> maps to letter A
+                  oval #2             -> maps to letter B
+                  oval #3             -> maps to letter C
+                  oval #4 (rightmost) -> maps to letter D
 
-                THE COLUMN IS THE ANSWER. Even if the fill is faint,
-                patchy, or half-filled, the oval with any visible
-                darkening or stroke inside it wins. If two ovals in the
-                same row look filled, take the one with the DARKER fill.
-                If both look equally dark, take the LEFTMOST.
+                WORK ONE ROW AT A TIME. For each row:
+
+                STEP A — Look at the four cells in that row, left to
+                right. Ignore the printed letters inside the ovals for
+                now. Just look at shading. Note which POSITION has the
+                darkest, most solid, most filled oval.
+
+                STEP B — Count that position from the left:
+                  1st position  -> A
+                  2nd position  -> B
+                  3rd position  -> C
+                  4th position  -> D
+
+                STEP C — Output the number and the mapped letter. Do
+                NOT read the letter from inside the filled oval. The
+                letter inside is often obscured by the fill, so you
+                must rely on the POSITION.
+
+                Example that you MUST get right:
+                If the fill is in the SECOND oval from the left, output
+                  <number> | B
+                even if the ink makes the oval LOOK like it contains a
+                C or a D. Position wins. Always.
+
+                The grid has faint vertical lines separating the four
+                columns. Use them as guides. The first column between
+                the left border and the first line is A. The second
+                column is B. The third is C. The fourth is D.
+
+                If two ovals in the same row both look filled, take the
+                one that is DARKER. If both look equally dark, take the
+                LEFTMOST one and use its POSITION number, not a letter
+                you think you read inside it.
 
                 If all four ovals in a row are completely empty (same
                 shade as the paper), the answer is blank.
@@ -1268,6 +1303,22 @@ private suspend fun transcribeBubbleSheet(context: Context, uri: Uri): String {
                 Truly ambiguous row where you cannot even tell which oval
                 is filled:
                   <number> | ?
+
+                STOPPING RULE — THIS IS CRITICAL:
+                Only output rows that are ACTUALLY PRINTED on the sheet.
+                Look at the last question number visible in the bubble
+                grid — that is where your output ends. Do NOT continue
+                the sequence past the last printed row. If the last
+                printed row is 30, your last output line is:
+                  30 | <letter>
+                Do NOT output rows 31, 32, 33 or any number that is not
+                physically present on the sheet. Do NOT fill in the
+                pattern you think should be there. Do NOT assume the
+                form continues to 50 just because 50 is a common number.
+
+                If you are uncertain whether a number is printed, look
+                at the sheet again. If there is no row with that number,
+                do not output that number.
 
                 Never invent a letter. Never carry a letter over from the
                 row above. Preserve number order.
@@ -1340,15 +1391,23 @@ private suspend fun retryUnclearRows(
                 crossed out, overwritten, or partially erased. But there
                 IS a mark.
 
-                Your job: look at each of those rows carefully, find the
-                single column that contains any non-white pixel — a
-                pencil stroke, a pen mark, a dot, a tick, a cross, a
-                scribble, or a shaded oval — and report the COLUMN LETTER
-                for that row, A, B, C or D. Do NOT try to read the
-                student's letter. Just report which column has the mark.
+                Your job: for each of those rows, COUNT the four cells
+                from left to right as position 1, 2, 3, 4. Position 1
+                maps to A, position 2 maps to B, position 3 maps to C,
+                position 4 maps to D.
 
-                If a row has marks in more than one column, report the
-                LEFTMOST marked column.
+                Find the position that contains any non-white pixel —
+                a pencil stroke, a pen mark, a dot, a tick, a cross,
+                a scribble, or a shaded oval. Report that POSITION's
+                letter (A/B/C/D).
+
+                Do NOT read the letter printed inside the filled oval.
+                It is often obscured. Use POSITION only. If the mark is
+                in the second cell from the left, the answer is B, even
+                if the ink makes it look like a different letter.
+
+                If a row has marks in more than one cell, report the
+                LEFTMOST marked position.
 
                 Output format, one line per number, nothing else:
 
@@ -1360,7 +1419,8 @@ private suspend fun retryUnclearRows(
                   41 | A
 
                 Do not output any other question numbers. Do not comment.
-                Do not explain.
+                Do not explain. Do not output rows for numbers that are
+                not printed on this sheet.
             """.trimIndent()
 
             val content = JSONArray()
@@ -1859,6 +1919,10 @@ private suspend fun transcribeTeacherAnswerKey(context: Context, uri: Uri): Stri
                 - Do NOT invent answers. Do NOT carry a letter over
                   from the row above.
                 - Preserve number order.
+                - STOPPING RULE: only output rows that are actually
+                  printed on the sheet. Stop at the last printed number.
+                  Do NOT output 31-50 unless those numbers are really
+                  printed on the sheet.
                 - Do NOT output any other text, headings, or commentary.
                 - Do NOT output student names, grades, or subject lines.
             """.trimIndent()
