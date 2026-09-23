@@ -270,7 +270,7 @@ fun HowToUseScreen(onBack: () -> Unit) {
             "or paste names comma-separated, or photograph a printed list. " +
             "Print the PDF, cut the sheets, give them to students. " +
             "Students mark the app's sheet by writing a single letter inside the bracket. " +
-            "Do NOT use pre-printed bubble or OMR sheets — the app does not support them."
+            "Pre-printed bubble sheets are supported too — see step 6."
         )
         HowToSection(
             "4. Scan the question paper",
@@ -289,10 +289,13 @@ fun HowToUseScreen(onBack: () -> Unit) {
         )
         HowToSection(
             "6. Collect student answer sheets",
-            "IMPORTANT: use the app's own printed answer sheets (see step 3), NOT pre-printed bubble/OMR sheets. " +
-            "Tap 'Collected Sheets' then 'Add Answer Sheets'. Photograph each student's completed sheet. " +
-            "The app reads the printed NAME at the top of each sheet. If a name is unreadable it will ask you to type it. " +
-            "If a bracket letter is smudged, the app reads the column instead."
+            "Tap 'Collected Sheets' then 'Add Answer Sheets'. " +
+            "For the app's own printed sheet (bracket layout), leave 'Sheet type' on BRACKET sheets. " +
+            "For a pre-printed OMR form where students shade ovals, tick 'Reading BUBBLE sheets'. " +
+            "Photograph each student's completed sheet. " +
+            "The app reads the printed NAME at the top. If a name is unreadable it will ask you to type it. " +
+            "If a bracket letter is smudged, or a bubble fill is faint, the app reads the column instead. " +
+            "For best bubble-sheet accuracy: flat sheet, no shadow across the ovals, dark pencil or pen."
         )
         HowToSection(
             "7. Grade",
@@ -535,7 +538,6 @@ fun buildAnswerSheetPdf(
     studentNames: List<String>,
     filenameBase: String
 ): String? {
-    // The very first slice is always the teacher's key sheet.
     val teacherLabel = "TEACHER KEY"
     val names = listOf(teacherLabel) + studentNames
     val cappedCount = if (questionCount > 50) 50 else questionCount
@@ -1198,6 +1200,108 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
     }
 }
 
+private suspend fun transcribeBubbleSheet(context: Context, uri: Uri): String {
+    return withContext(Dispatchers.IO) {
+        try {
+            val isr = context.contentResolver.openInputStream(uri) ?: return@withContext "ERR: cannot open image"
+            val bmp = BitmapFactory.decodeStream(isr)
+            isr.close()
+            val scaled = Bitmap.createScaledBitmap(bmp, 1600, 2200, true)
+            val baos = ByteArrayOutputStream()
+            scaled.compress(Bitmap.CompressFormat.JPEG, 92, baos)
+            val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
+            val client = OkHttpClient.Builder()
+                .connectTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(300, TimeUnit.SECONDS)
+                .writeTimeout(60, TimeUnit.SECONDS)
+                .build()
+
+            val prompt = """
+                FIRST PRIORITY: Read the student's name.
+
+                This is a BUBBLE / OMR ANSWER SHEET — a pre-printed form
+                where the student shades or darkens one oval per question,
+                and one oval per letter option A B C D. The ovals are
+                arranged in a grid, one row per question, four columns of
+                ovals labelled A B C D.
+
+                STEP 1 — Output the student header:
+
+                ---STUDENT---
+                NAME: <name as printed or handwritten at the top, exactly>
+                GRADE: <grade as printed>
+                SUBJ: <subject as printed>
+                ---SHEET---
+
+                If there is no name at all, output:
+
+                ---STUDENT---
+                NAME:
+                ---SHEET---
+
+                STEP 2 — Read the bubble grid.
+
+                For each question number row, look at the four ovals in
+                that row, in this fixed order left to right:
+                  A oval | B oval | C oval | D oval
+
+                Exactly one oval SHOULD be filled. Determine which one by
+                looking for the oval that is darker, more shaded, more
+                solid, or has more ink/pencil marks inside it than the
+                other three ovals in the same row.
+
+                THE COLUMN IS THE ANSWER. Even if the fill is faint,
+                patchy, or half-filled, the oval with any visible
+                darkening or stroke inside it wins. If two ovals in the
+                same row look filled, take the one with the DARKER fill.
+                If both look equally dark, take the LEFTMOST.
+
+                If all four ovals in a row are completely empty (same
+                shade as the paper), the answer is blank.
+
+                Output shape, one line per question:
+
+                  <number> | <letter>
+
+                where <letter> is A, B, C or D. Blank row:
+                  <number> |
+                Truly ambiguous row where you cannot even tell which oval
+                is filled:
+                  <number> | ?
+
+                Never invent a letter. Never carry a letter over from the
+                row above. Preserve number order.
+
+                STEP 3 — Below the ---SHEET--- line, output ONLY the
+                answer lines. No commentary. No headings. No summary.
+            """.trimIndent()
+
+            val content = JSONArray()
+                .put(JSONObject().put("type", "text").put("text", prompt))
+                .put(JSONObject().put("type", "image_url")
+                    .put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$b64")))
+            val body = JSONObject()
+                .put("model", "gpt-5.6-luna")
+                .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
+                .put("max_completion_tokens", 4000)
+                .toString()
+            val req = Request.Builder()
+                .url("https://api.openai.com/v1/chat/completions")
+                .post(body.toRequestBody("application/json".toMediaType()))
+                .addHeader("Authorization", "Bearer $OPENAI_API_KEY")
+                .build()
+            client.newCall(req).execute().use { res ->
+                val js = res.body?.string() ?: return@use "ERR: empty response body"
+                if (!res.isSuccessful) return@use "ERR HTTP ${res.code}: ${js.take(400)}"
+                try {
+                    JSONObject(js).getJSONArray("choices").getJSONObject(0)
+                        .getJSONObject("message").getString("content").trim()
+                } catch (e: Exception) { "ERR parse: ${e.message} | raw: ${js.take(400)}" }
+            }
+        } catch (e: Exception) { "ERR exception: ${e.message}" }
+    }
+}
+
 private suspend fun retryUnclearRows(
     context: Context,
     uri: Uri,
@@ -1239,9 +1343,9 @@ private suspend fun retryUnclearRows(
                 Your job: look at each of those rows carefully, find the
                 single column that contains any non-white pixel — a
                 pencil stroke, a pen mark, a dot, a tick, a cross, a
-                scribble — and report the COLUMN LETTER for that row,
-                A, B, C or D. Do NOT try to read the student's letter.
-                Just report which column has the mark.
+                scribble, or a shaded oval — and report the COLUMN LETTER
+                for that row, A, B, C or D. Do NOT try to read the
+                student's letter. Just report which column has the mark.
 
                 If a row has marks in more than one column, report the
                 LEFTMOST marked column.
@@ -1866,7 +1970,6 @@ private suspend fun imageToBase64(context: Context, uri: Uri): String {
 }
 
 // ===== ROSTER FILE HELPERS =====
-// Reads a plain-text file and returns its raw content.
 private suspend fun readTextFile(context: Context, uri: Uri): String {
     return withContext(Dispatchers.IO) {
         try {
@@ -1877,15 +1980,12 @@ private suspend fun readTextFile(context: Context, uri: Uri): String {
     }
 }
 
-// Copies an InputStream into a cache file and returns it.
 private fun copyToCache(context: Context, input: java.io.InputStream, name: String): File {
     val f = File(context.cacheDir, name)
     FileOutputStream(f).use { outStream -> input.copyTo(outStream) }
     return f
 }
 
-// Renders every page of a PDF to a JPEG and sends each page to the
-// existing AI name-extraction function.
 private suspend fun extractNamesFromPdfViaAi(context: Context, uri: Uri): List<String> {
     return withContext(Dispatchers.IO) {
         try {
@@ -1922,8 +2022,6 @@ private suspend fun extractNamesFromPdfViaAi(context: Context, uri: Uri): List<S
     }
 }
 
-// Cleans raw text into a name list: removes numbering, headers,
-// money amounts, empty lines. Used for TXT files.
 private fun cleanNamesFromText(raw: String): List<String> {
     if (raw.isBlank()) return emptyList()
     val out = mutableListOf<String>()
@@ -2061,6 +2159,7 @@ fun WaveUnitsApp() {
     var selectedPortfolioStudent by remember { mutableStateOf<ClassPathStudentPortfolio?>(null) }
 
     var lastSeenPrintedName by remember { mutableStateOf<String?>(null) }
+    var bubbleSheetMode by remember { mutableStateOf(false) }
 
     var isEditingAnswerKey by remember { mutableStateOf(false) }
     var editableKeyText by remember { mutableStateOf("") }
@@ -2115,6 +2214,7 @@ fun WaveUnitsApp() {
         allResults = emptyList()
         initialLoadComplete = false
         lastSeenPrintedName = null
+        bubbleSheetMode = false
         isEditingAnswerKey = false
         editableKeyText = ""
         currentView = "home"
@@ -3206,7 +3306,11 @@ fun WaveUnitsApp() {
                             isExtracting = true
                             for ((idx, uri) in uris.withIndex()) {
                                 progressText = "Transcribing sheet ${idx + 1} of ${uris.size}..."
-                                var printout = transcribeAnswerSheet(context, uri)
+                                var printout = if (bubbleSheetMode) {
+                                    transcribeBubbleSheet(context, uri)
+                                } else {
+                                    transcribeAnswerSheet(context, uri)
+                                }
                                 val imgB64 = imageToBase64(context, uri)
                                 val printedName = extractPrintedStudentName(printout)
                                 val resolvedName: String
@@ -5054,7 +5158,38 @@ fun WaveUnitsApp() {
                                                 fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10b981))
                                             Text("Names are read from the printed header on each sheet.",
                                                 color = Color(0xFF94a3b8), fontSize = 11.sp)
-                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Spacer(modifier = Modifier.height(10.dp))
+
+                                            Card(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF0f172a))
+                                            ) {
+                                                Column(modifier = Modifier.padding(12.dp)) {
+                                                    Text("Sheet type", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 13.sp)
+                                                    Text("Bracket Sheet is the app's own printed form (write a letter inside a bracket). Bubble Sheet is a pre-printed OMR form where students shade ovals.",
+                                                        color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        Checkbox(
+                                                            checked = bubbleSheetMode,
+                                                            onCheckedChange = { bubbleSheetMode = it }
+                                                        )
+                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                        Text(
+                                                            if (bubbleSheetMode) "Reading BUBBLE sheets" else "Reading BRACKET sheets",
+                                                            color = if (bubbleSheetMode) Color(0xFFf59e0b) else Color(0xFF10b981),
+                                                            fontSize = 13.sp, fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+                                                    if (bubbleSheetMode) {
+                                                        Spacer(modifier = Modifier.height(6.dp))
+                                                        Text("Tip: flat sheet, no shadow across the ovals, dark pencil or pen. Faint shading may be misread.",
+                                                            color = Color(0xFFef4444), fontSize = 11.sp)
+                                                    }
+                                                }
+                                            }
+                                            Spacer(modifier = Modifier.height(10.dp))
+
                                             Button(onClick = { launchScan("answer_sheets") },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10b981))
