@@ -1075,6 +1075,7 @@ private suspend fun transcribeAnswerSheet(context: Context, uri: Uri): String {
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext "ERR: cannot open image"
             val bmp = BitmapFactory.decodeStream(isr)
             isr.close()
+            if (bmp == null) return@withContext "ERR: could not decode image"
             val scaled = Bitmap.createScaledBitmap(bmp, 1400, 1900, true)
             val baos = ByteArrayOutputStream()
             scaled.compress(Bitmap.CompressFormat.JPEG, 88, baos)
@@ -1213,6 +1214,7 @@ private suspend fun transcribeBubbleSheet(context: Context, uri: Uri): String {
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext "ERR: cannot open image"
             val bmp = BitmapFactory.decodeStream(isr)
             isr.close()
+            if (bmp == null) return@withContext "ERR: could not decode image"
             val scaled = Bitmap.createScaledBitmap(bmp, 1600, 2200, true)
             val baos = ByteArrayOutputStream()
             scaled.compress(Bitmap.CompressFormat.JPEG, 92, baos)
@@ -1364,8 +1366,10 @@ private suspend fun retryUnclearRows(
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext emptyMap()
             val full = BitmapFactory.decodeStream(isr)
             isr.close()
+            if (full == null) return@withContext emptyMap()
             val cropTop = (full.height * 0.25f).toInt()
             val cropH = full.height - cropTop
+            if (cropH <= 0 || full.width <= 0) return@withContext emptyMap()
             val grid = Bitmap.createBitmap(full, 0, cropTop, full.width, cropH)
             val scaled = Bitmap.createScaledBitmap(grid, 1600, 2200, true)
             val baos = ByteArrayOutputStream()
@@ -1767,6 +1771,7 @@ private suspend fun extractTextFromImage(context: Context, uri: Uri): String {
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext ""
             val fullBmp = BitmapFactory.decodeStream(isr)
             isr.close()
+            if (fullBmp == null) return@withContext ""
 
             val topHalf = Bitmap.createBitmap(fullBmp, 0, 0, fullBmp.width, fullBmp.height / 2)
             val bottomHalf = Bitmap.createBitmap(fullBmp, 0, fullBmp.height / 2, fullBmp.width, fullBmp.height - fullBmp.height / 2)
@@ -1866,6 +1871,7 @@ private suspend fun transcribeTeacherAnswerKey(context: Context, uri: Uri): Stri
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext "ERR: cannot open image"
             val bmp = BitmapFactory.decodeStream(isr)
             isr.close()
+            if (bmp == null) return@withContext "ERR: could not decode image"
             val scaled = Bitmap.createScaledBitmap(bmp, 1400, 1900, true)
             val baos = ByteArrayOutputStream()
             scaled.compress(Bitmap.CompressFormat.JPEG, 90, baos)
@@ -1959,6 +1965,7 @@ private suspend fun extractNamesFromDocument(context: Context, uri: Uri): String
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext ""
             val bmp = BitmapFactory.decodeStream(isr)
             isr.close()
+            if (bmp == null) return@withContext ""
             val scaled = Bitmap.createScaledBitmap(bmp, 1400, 1900, true)
             val baos = ByteArrayOutputStream()
             scaled.compress(Bitmap.CompressFormat.JPEG, 88, baos)
@@ -2025,6 +2032,7 @@ private suspend fun imageToBase64(context: Context, uri: Uri): String {
             val isr = context.contentResolver.openInputStream(uri) ?: return@withContext ""
             val bmp = BitmapFactory.decodeStream(isr)
             isr.close()
+            if (bmp == null) return@withContext ""
             val scaled = Bitmap.createScaledBitmap(bmp, 400, 600, true)
             val baos = ByteArrayOutputStream()
             scaled.compress(Bitmap.CompressFormat.JPEG, 30, baos)
@@ -2223,7 +2231,7 @@ fun WaveUnitsApp() {
     var selectedPortfolioStudent by remember { mutableStateOf<ClassPathStudentPortfolio?>(null) }
 
     var lastSeenPrintedName by remember { mutableStateOf<String?>(null) }
-    var bubbleSheetMode by remember { mutableStateOf(false) }
+    var bubbleSheetMode by remember { mutableStateOf(prefs.getBoolean("bubbleSheetMode", false)) }
 
     var isEditingAnswerKey by remember { mutableStateOf(false) }
     var editableKeyText by remember { mutableStateOf("") }
@@ -2278,7 +2286,6 @@ fun WaveUnitsApp() {
         allResults = emptyList()
         initialLoadComplete = false
         lastSeenPrintedName = null
-        bubbleSheetMode = false
         isEditingAnswerKey = false
         editableKeyText = ""
         currentView = "home"
@@ -3248,6 +3255,7 @@ fun WaveUnitsApp() {
             val uris = scanResult?.pages?.map { it.imageUri } ?: emptyList()
             if (uris.isNotEmpty()) {
                 scope.launch {
+                  try {
                     when (scanPhase) {
                         "teacher_answer_key" -> {
                             isExtracting = true
@@ -3272,8 +3280,6 @@ fun WaveUnitsApp() {
                             }
                             if (allBare.isEmpty()) {
                                 Toast.makeText(context, "No answers detected. Retake the photo flatter and better lit.", Toast.LENGTH_LONG).show()
-                                isExtracting = false
-                                scanPhase = ""
                                 return@launch
                             }
                             val merged = mergeBareAnswersIntoLongForm(aiAnswerSheet, allBare, allBare.keys.maxOrNull() ?: 0)
@@ -3287,8 +3293,6 @@ fun WaveUnitsApp() {
                             simplifiedAnswerKey = shortForm
                             answerKey = shortForm
                             extractedQuestions = parseAnswerKeyToQuestions(merged)
-                            isExtracting = false
-                            scanPhase = ""
                             val answered = allBare.size
                             progressText = "Read $answered answer(s)."
                             Toast.makeText(context, "Answer key updated: $answered answer(s) read.", Toast.LENGTH_LONG).show()
@@ -3312,8 +3316,6 @@ fun WaveUnitsApp() {
                                 rosterInput = cleaned.joinToString(", ")
                                 Toast.makeText(context, "Loaded ${cleaned.size} names. Review and save.", Toast.LENGTH_LONG).show()
                             }
-                            isExtracting = false
-                            scanPhase = ""
                             sectionState = sectionState.copy(isRosterSetupOpen = true)
                         }
                         "question_paper" -> {
@@ -3363,14 +3365,14 @@ fun WaveUnitsApp() {
                                 "answerSheetGenerated" to true,
                                 "markingMode" to "teacher-scanned"))
                             progressText = "Extracted ${allQs.size} questions. Total: ${newQs.size}. Scan your answer sheet next."
-                            isExtracting = false
-                            loadProjects(); loadExamData(currentProjectId); scanPhase = ""
+                            loadProjects(); loadExamData(currentProjectId)
                         }
                         "answer_sheets" -> {
                             isExtracting = true
                             for ((idx, uri) in uris.withIndex()) {
                                 progressText = "Transcribing sheet ${idx + 1} of ${uris.size}..."
-                                var printout = if (bubbleSheetMode) {
+                                val useBubbleMode = bubbleSheetMode
+                                var printout = if (useBubbleMode) {
                                     transcribeBubbleSheet(context, uri)
                                 } else {
                                     transcribeAnswerSheet(context, uri)
@@ -3427,15 +3429,24 @@ fun WaveUnitsApp() {
                                     )
                                 )
                             }
-                            isExtracting = false
                             progressText = "Transcribed ${uris.size} sheet(s)."
-                            scanPhase = ""
                             val unmatched = collectedStudentAnswerSheets.filter { !it.matched }
                             if (unmatched.isNotEmpty()) {
                                 pendingSheetRename = unmatched.first()
                             }
                         }
                     }
+                  } catch (e: Exception) {
+                      Toast.makeText(
+                          context,
+                          "Scan handler error: ${e.message ?: e.javaClass.simpleName}",
+                          Toast.LENGTH_LONG
+                      ).show()
+                      e.printStackTrace()
+                  } finally {
+                      isExtracting = false
+                      scanPhase = ""
+                  }
                 }
             }
         }
@@ -5236,7 +5247,10 @@ fun WaveUnitsApp() {
                                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                                         Checkbox(
                                                             checked = bubbleSheetMode,
-                                                            onCheckedChange = { bubbleSheetMode = it }
+                                                            onCheckedChange = {
+                                                                bubbleSheetMode = it
+                                                                prefs.edit().putBoolean("bubbleSheetMode", it).apply()
+                                                            }
                                                         )
                                                         Spacer(modifier = Modifier.width(6.dp))
                                                         Text(
