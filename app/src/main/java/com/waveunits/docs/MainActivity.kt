@@ -3475,8 +3475,8 @@ fun WaveUnitsApp() {
                                 }
                                 // If the teacher set a last-question number, drop
                                 // any hallucinated rows past it.
-                                val maxQ = expectedQuestionCount.toIntOrNull()
-                                if (maxQ != null && maxQ > 0 && useBubbleMode) {
+                                                               val maxQ = expectedQuestionCount.toIntOrNull()
+                                if (maxQ != null && maxQ > 0) {
                                     val body = if (printout.contains("---SHEET---")) printout.substringAfter("---SHEET---") else printout
                                     val header = if (printout.contains("---SHEET---")) printout.substringBefore("---SHEET---") + "---SHEET---\n" else ""
                                     val kept = body.lines().filter { line ->
@@ -5355,44 +5355,54 @@ fun WaveUnitsApp() {
                                                     Text("Bracket Sheet is the app's own printed form (write a letter inside a bracket). Bubble Sheet is a pre-printed OMR form where students shade ovals.",
                                                         color = Color(0xFF94a3b8), fontSize = 11.sp)
                                                     Spacer(modifier = Modifier.height(8.dp))
-                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                                                                        Row(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .clickable {
+                                                                val newVal = !bubbleSheetMode
+                                                                bubbleSheetMode = newVal
+                                                                prefs.edit().putBoolean("bubbleSheetMode", newVal).apply()
+                                                            },
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
                                                         Checkbox(
                                                             checked = bubbleSheetMode,
-                                                            onCheckedChange = {
-                                                                bubbleSheetMode = it
-                                                                prefs.edit().putBoolean("bubbleSheetMode", it).apply()
+                                                            onCheckedChange = { checked ->
+                                                                bubbleSheetMode = checked
+                                                                prefs.edit().putBoolean("bubbleSheetMode", checked).apply()
                                                             }
                                                         )
                                                         Spacer(modifier = Modifier.width(6.dp))
                                                         Text(
-                                                            if (bubbleSheetMode) "Reading BUBBLE sheets" else "Reading BRACKET sheets",
+                                                            if (bubbleSheetMode) "Read BUBBLE sheets" else "Read BRACKET sheets",
                                                             color = if (bubbleSheetMode) Color(0xFFf59e0b) else Color(0xFF10b981),
-                                                            fontSize = 13.sp, fontWeight = FontWeight.Bold
+                                                            fontSize = 14.sp, fontWeight = FontWeight.Bold
                                                         )
                                                     }
-                                                    if (bubbleSheetMode) {
+                                                                                                    if (bubbleSheetMode) {
                                                         Spacer(modifier = Modifier.height(6.dp))
                                                         Text("Tip: flat sheet, no shadow across the ovals, dark pencil or pen. Faint shading may be misread.",
                                                             color = Color(0xFFef4444), fontSize = 11.sp)
-
-                                                        Spacer(modifier = Modifier.height(10.dp))
-                                                        Text("Last question number on the paper", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 13.sp)
-                                                        Text("Type the number of the LAST question on the exam paper. The app will not read any rows past this number.",
-                                                            color = Color(0xFF94a3b8), fontSize = 11.sp)
-                                                        Spacer(modifier = Modifier.height(6.dp))
-                                                        OutlinedTextField(
-                                                            value = expectedQuestionCount,
-                                                            onValueChange = { v ->
-                                                                val filtered = v.filter { it.isDigit() }.take(3)
-                                                                expectedQuestionCount = filtered
-                                                                prefs.edit().putString("expectedQuestionCount", filtered).apply()
-                                                            },
-                                                            label = { Text("e.g. 30") },
-                                                            modifier = Modifier.fillMaxWidth(),
-                                                            singleLine = true
-                                                        )
                                                     }
+
+                                                    Spacer(modifier = Modifier.height(12.dp))
+                                                    Text("Last question number on the paper", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 13.sp)
+                                                    Text("Type the number of the LAST question on the exam paper. The app will not read any rows past this number.",
+                                                        color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                    Spacer(modifier = Modifier.height(6.dp))
+                                                    OutlinedTextField(
+                                                        value = expectedQuestionCount,
+                                                        onValueChange = { v ->
+                                                            val filtered = v.filter { it.isDigit() }.take(3)
+                                                            expectedQuestionCount = filtered
+                                                            prefs.edit().putString("expectedQuestionCount", filtered).apply()
+                                                        },
+                                                        label = { Text("e.g. 30") },
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        singleLine = true
+                                                    )
                                                 }
+                                              }
                                             }
                                             Spacer(modifier = Modifier.height(10.dp))
 
