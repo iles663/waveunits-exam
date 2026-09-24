@@ -1247,83 +1247,82 @@ private suspend fun transcribeBubbleSheet(context: Context, uri: Uri): String {
                 ---STUDENT---
                 NAME:
                 ---SHEET---
-
                 STEP 2 — Read the bubble grid.
 
-                For each question number row, there are FOUR ovals.
-                Count them by POSITION, not by the letter you think
-                is inside them. Label them in your head like this:
+                HOW THE GRID IS LAID OUT:
+                Each row has, from left to right:
+                  (1) the ROW NUMBER printed in the leftmost narrow
+                      column — this is NOT an oval. It is a number.
+                  (2) FOUR ovals next to it, labelled A, B, C, D.
 
-                  oval #1 (leftmost)  -> maps to letter A
-                  oval #2             -> maps to letter B
-                  oval #3             -> maps to letter C
-                  oval #4 (rightmost) -> maps to letter D
+                The row number is OUTSIDE the oval grid. It is not a
+                fifth oval. It is not column A. It is just the label
+                for the row.
+
+                THE ONLY OVALS YOU EVER COUNT ARE THE FOUR LABELLED
+                A B C D. Count them by POSITION within the four-oval
+                group, not by the letter you think is inside:
+
+                  first oval of the group   -> A
+                  second oval of the group  -> B
+                  third oval of the group   -> C
+                  fourth oval of the group  -> D
 
                 WORK ONE ROW AT A TIME. For each row:
 
-                STEP A — Look at the four cells in that row, left to
-                right. Ignore the printed letters inside the ovals for
-                now. Just look at shading. Note which POSITION has the
-                darkest, most solid, most filled oval.
+                STEP A — Find the four-oval group for that row. Ignore
+                the row number to its left entirely.
 
-                STEP B — Count that position from the left:
-                  1st position  -> A
-                  2nd position  -> B
-                  3rd position  -> C
-                  4th position  -> D
+                STEP B — Look at the four ovals only. Note which one
+                has the darkest, most solid, most filled interior.
 
-                STEP C — Output the number and the mapped letter. Do
-                NOT read the letter from inside the filled oval. The
-                letter inside is often obscured by the fill, so you
-                must rely on the POSITION.
+                STEP C — Map that oval's position to a letter:
+                  first  (leftmost)  -> A
+                  second             -> B
+                  third              -> C
+                  fourth (rightmost) -> D
+
+                STEP D — Output the row number and the mapped letter.
+
+                Do NOT read the letter from inside the filled oval.
+                The fill often obscures it. Use POSITION only.
 
                 Example that you MUST get right:
-                If the fill is in the SECOND oval from the left, output
-                  <number> | B
-                even if the ink makes the oval LOOK like it contains a
-                C or a D. Position wins. Always.
+                If the row number is 1 and the fill is in the FIRST
+                oval of the group, output:
+                  1 | A
+                NOT 1 | B. The row number is not an oval. Count from
+                the first OVAL, not from the row number.
 
-                The grid has faint vertical lines separating the four
-                columns. Use them as guides. The first column between
-                the left border and the first line is A. The second
-                column is B. The third is C. The fourth is D.
+                If two ovals in the same row both look filled, take
+                the DARKER one. If equally dark, take the LEFTMOST of
+                the four ovals.
 
-                If two ovals in the same row both look filled, take the
-                one that is DARKER. If both look equally dark, take the
-                LEFTMOST one and use its POSITION number, not a letter
-                you think you read inside it.
-
-                If all four ovals in a row are completely empty (same
-                shade as the paper), the answer is blank.
-
-                Output shape, one line per question:
-
-                  <number> | <letter>
-
-                where <letter> is A, B, C or D. Blank row:
+                BLANK ROWS — THIS IS CRITICAL:
+                Some sheets print more rows than the student answered.
+                A printed row with NO fill in ANY of its four ovals
+                must be output as:
                   <number> |
-                Truly ambiguous row where you cannot even tell which oval
-                is filled:
+                with NOTHING after the pipe. Do NOT invent a letter for
+                an empty row. Do NOT carry a letter from the row above.
+                Do NOT assume the answer should be A or B or any letter
+                just because the row exists. An empty row is empty.
+
+                If you can see the row's four ovals and none of them
+                is filled, the answer for that row is BLANK.
+
+                If a row's fill is visible but you genuinely cannot
+                tell which of the four ovals it is in, output:
                   <number> | ?
 
-                STOPPING RULE — THIS IS CRITICAL:
+                STOPPING RULE:
                 Only output rows that are ACTUALLY PRINTED on the sheet.
-                Look at the last question number visible in the bubble
-                grid — that is where your output ends. Do NOT continue
-                the sequence past the last printed row. If the last
-                printed row is 30, your last output line is:
-                  30 | <letter>
-                Do NOT output rows 31, 32, 33 or any number that is not
-                physically present on the sheet. Do NOT fill in the
-                pattern you think should be there. Do NOT assume the
-                form continues to 50 just because 50 is a common number.
+                If a row number is not printed, do not output it. But
+                if a row number IS printed and the row is empty, still
+                output it — with a blank answer, per the rule above.
 
-                If you are uncertain whether a number is printed, look
-                at the sheet again. If there is no row with that number,
-                do not output that number.
-
-                Never invent a letter. Never carry a letter over from the
-                row above. Preserve number order.
+                Never invent a letter. Never carry a letter over from
+                the row above. Preserve number order.
 
                 STEP 3 — Below the ---SHEET--- line, output ONLY the
                 answer lines. No commentary. No headings. No summary.
