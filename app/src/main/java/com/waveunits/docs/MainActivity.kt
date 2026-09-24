@@ -5379,7 +5379,7 @@ fun WaveUnitsApp() {
                                                             fontSize = 14.sp, fontWeight = FontWeight.Bold
                                                         )
                                                     }
-                                                                                                    if (bubbleSheetMode) {
+                                                    if (bubbleSheetMode) {
                                                         Spacer(modifier = Modifier.height(6.dp))
                                                         Text("Tip: flat sheet, no shadow across the ovals, dark pencil or pen. Faint shading may be misread.",
                                                             color = Color(0xFFef4444), fontSize = 11.sp)
