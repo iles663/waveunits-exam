@@ -1249,28 +1249,56 @@ private suspend fun transcribeBubbleSheet(context: Context, uri: Uri): String {
                 NAME:
                 ---SHEET---
 
-                STEP 2 — Read the bubble grid.
+                                STEP 2 — Read the bubble grid.
 
-                HOW THE GRID IS LAID OUT:
-                Each row has, from left to right:
-                  (1) the ROW NUMBER printed in the leftmost narrow
-                      column — this is NOT an oval. It is a number.
-                  (2) FOUR ovals next to it, labelled A, B, C, D.
+                HOW THE GRID IS LAID OUT ON THIS TYPE OF SHEET:
+                The grid is divided into BLOCKS. The blocks are laid
+                out side by side across the page. The block size is
+                NOT fixed — a block might hold 15 rows, or 20, or 25,
+                or another number. Do NOT assume any specific block
+                size. Read each block as it appears.
 
-                The row number is OUTSIDE the oval grid. It is not a
-                fifth oval. It is not column A. It is just the label
-                for the row.
+                Each block has:
+                  (1) a tall narrow COLUMN OF ROW NUMBERS running down
+                      its left edge. Each number in that column labels
+                      one row of ovals inside the block.
+                  (2) to the right of those numbers, one ROW per
+                      number, and each row contains FOUR ovals laid
+                      out left to right and labelled A B C D.
+
+                Blocks can sit on the same visual row as each other.
+                For example, the top of the sheet might have block 1
+                (rows 1-20) on the left and block 2 (rows 21-40)
+                beside it on the same horizontal band, then below
+                them block 3 (rows 41-60), and so on. The block
+                boundaries are the vertical lines running down the
+                sheet.
+
+                READ ONE BLOCK AT A TIME. Finish a block completely
+                (its top row down to its bottom row) before moving
+                to the next block. Do NOT read the whole sheet left
+                to right as one long strip. Do NOT skip a block. Do
+                NOT merge two blocks.
+
+                THE NUMBER YOU OUTPUT IS THE NUMBER PRINTED IN THE
+                ROW-NUMBER COLUMN of that block. Copy that number.
+                Do not guess or continue a pattern from a neighbouring
+                block.
+
+                The row number is OUTSIDE the four ovals. It is not
+                an oval. It is not column A.
 
                 THE ONLY OVALS YOU EVER COUNT ARE THE FOUR LABELLED
-                A B C D. Count them by POSITION within the four-oval
-                group, not by the letter you think is inside:
+                A B C D in each row. Count them by POSITION within
+                the four-oval group, not by the letter you think is
+                inside:
 
                   first oval of the group   -> A
                   second oval of the group  -> B
                   third oval of the group   -> C
                   fourth oval of the group  -> D
 
-                IMPORTANT — HOW TO COUNT POSITION RELIABLY:
+                HOW TO COUNT POSITION RELIABLY:
                 Before deciding which oval is filled, identify the
                 FOUR ovals of the row as a set. They are evenly spaced
                 and horizontally aligned. The leftmost of the four is
@@ -1281,14 +1309,24 @@ private suspend fun transcribeBubbleSheet(context: Context, uri: Uri): String {
                   1st -> A,  2nd -> B,  3rd -> C,  4th -> D
 
                 Do NOT skip an oval. Do NOT count the row number as
-                an oval. Do NOT count empty space between blocks as
-                an oval. The four ovals sit immediately next to each
-                other in a tight row.
+                an oval.
 
-                If you are not 100% sure which oval is filled, look
-                at the DARKNESS: the filled oval is much darker than
-                the three empty ones next to it. Compare each oval to
-                its three neighbours before committing.
+                SHADOWS AND DARK PATCHES:
+                If a shadow, a shadow edge, or a dark region crosses
+                part of the sheet, the ovals under it will look dark
+                even when they are empty. Before deciding that an
+                oval is filled, check whether the DARKNESS is INSIDE
+                that one oval or whether it affects TWO OR MORE ovals
+                in the same row equally.
+
+                If the darkness affects several ovals the same way,
+                that is a shadow, not a fill. Those rows are BLANK.
+
+                A real fill is INSIDE ONE OVAL and leaves the OTHER
+                THREE ovals in the same row clearly lighter. If the
+                other three are not clearly lighter, treat the row
+                as shadowed and output:
+                  <number> | ?
 
                 WORK ONE ROW AT A TIME. For each row:
 
@@ -1354,9 +1392,20 @@ private suspend fun transcribeBubbleSheet(context: Context, uri: Uri): String {
                 NOT a fill. A shadow is NOT a fill. Only a student's
                 deliberate pencil/pen mark counts as a fill.
 
-                ONLY COMMIT TO A LETTER WHEN THE FILL IS OBVIOUS.
-                A wrong letter is worse than a blank. If in doubt,
-                output blank.
+                                WHEN TO USE ? INSTEAD OF A LETTER:
+                If the photo has a shadow, uneven lighting, or the
+                ovals are not all the same brightness, you will not
+                always be able to tell a fill from a shadow.
+
+                In that case, output:
+                  <number> | ?
+
+                Use ? freely. It tells the teacher "check this one
+                by hand". A ? is safe. A wrong letter is dangerous.
+
+                ONLY COMMIT TO A LETTER WHEN THE FILL IS OBVIOUS
+                AND THE OTHER THREE OVALS IN THE SAME ROW ARE
+                CLEARLY LIGHTER THAN IT.
 
                 If a row's fill is visible but you genuinely cannot
                 tell which of the four ovals it is in, output:
