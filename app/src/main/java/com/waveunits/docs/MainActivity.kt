@@ -292,6 +292,7 @@ fun HowToUseScreen(onBack: () -> Unit) {
             "Tap 'Collected Sheets' then 'Add Answer Sheets'. " +
             "For the app's own printed sheet (bracket layout), leave 'Sheet type' on BRACKET sheets. " +
             "For a pre-printed OMR form where students shade ovals, tick 'Reading BUBBLE sheets'. " +
+            "Then type the number of the LAST question on the paper (e.g. 30 or 60). The app will not read any rows past that number. " +
             "Photograph each student's completed sheet. " +
             "The app reads the printed NAME at the top. If a name is unreadable it will ask you to type it. " +
             "If a bracket letter is smudged, or a bubble fill is faint, the app reads the column instead. " +
@@ -1215,9 +1216,9 @@ private suspend fun transcribeBubbleSheet(context: Context, uri: Uri): String {
             val bmp = BitmapFactory.decodeStream(isr)
             isr.close()
             if (bmp == null) return@withContext "ERR: could not decode image"
-            val scaled = Bitmap.createScaledBitmap(bmp, 1600, 2200, true)
+            val scaled = Bitmap.createScaledBitmap(bmp, 2400, 3200, true)
             val baos = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 92, baos)
+            scaled.compress(Bitmap.CompressFormat.JPEG, 95, baos)
             val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
             val client = OkHttpClient.Builder()
                 .connectTimeout(60, TimeUnit.SECONDS)
@@ -1247,6 +1248,7 @@ private suspend fun transcribeBubbleSheet(context: Context, uri: Uri): String {
                 ---STUDENT---
                 NAME:
                 ---SHEET---
+
                 STEP 2 — Read the bubble grid.
 
                 HOW THE GRID IS LAID OUT:
@@ -1267,6 +1269,26 @@ private suspend fun transcribeBubbleSheet(context: Context, uri: Uri): String {
                   second oval of the group  -> B
                   third oval of the group   -> C
                   fourth oval of the group  -> D
+
+                IMPORTANT — HOW TO COUNT POSITION RELIABLY:
+                Before deciding which oval is filled, identify the
+                FOUR ovals of the row as a set. They are evenly spaced
+                and horizontally aligned. The leftmost of the four is
+                position 1 (A). The rightmost is position 4 (D).
+
+                Say to yourself: "which of these four is filled, and
+                is it the first, second, third, or fourth?" Then map:
+                  1st -> A,  2nd -> B,  3rd -> C,  4th -> D
+
+                Do NOT skip an oval. Do NOT count the row number as
+                an oval. Do NOT count empty space between blocks as
+                an oval. The four ovals sit immediately next to each
+                other in a tight row.
+
+                If you are not 100% sure which oval is filled, look
+                at the DARKNESS: the filled oval is much darker than
+                the three empty ones next to it. Compare each oval to
+                its three neighbours before committing.
 
                 WORK ONE ROW AT A TIME. For each row:
 
@@ -1298,18 +1320,43 @@ private suspend fun transcribeBubbleSheet(context: Context, uri: Uri): String {
                 the DARKER one. If equally dark, take the LEFTMOST of
                 the four ovals.
 
-                BLANK ROWS — THIS IS CRITICAL:
-                Some sheets print more rows than the student answered.
-                A printed row with NO fill in ANY of its four ovals
-                must be output as:
-                  <number> |
-                with NOTHING after the pipe. Do NOT invent a letter for
-                an empty row. Do NOT carry a letter from the row above.
-                Do NOT assume the answer should be A or B or any letter
-                just because the row exists. An empty row is empty.
+                BLANK ROWS — THIS IS THE MOST IMPORTANT RULE.
+                Many students do not answer every question. Their sheet
+                has printed ovals for those rows but NO dark fill in
+                any of them. Those rows MUST be output as blank:
 
-                If you can see the row's four ovals and none of them
-                is filled, the answer for that row is BLANK.
+                  <number> |
+
+                with NOTHING after the pipe. Do NOT invent a letter.
+                Do NOT assume the answer is A because A is common. Do
+                NOT assume the answer is B because the B oval looks a
+                little darker. Do NOT carry a letter from the row above.
+
+                HOW TO DECIDE BLANK vs FILLED — use CONTRAST, not
+                absolute darkness:
+                  1. Look at the four ovals in that row side by side.
+                  2. Compare them to each other.
+                  3. If ONE oval is CLEARLY darker than the other three
+                     — the difference is obvious to the naked eye, like
+                     a filled pencil oval next to three empty ones —
+                     then output that oval's position letter.
+                  4. If all four ovals look roughly the SAME darkness,
+                     the row is BLANK. Output `<number> |` and move on.
+
+                "Roughly the same darkness" means you would not be able
+                to tell a human observer which oval is filled. If you
+                have to squint, or the difference is subtle, or one
+                oval is only marginally darker than the others, that
+                is a BLANK row.
+
+                A printed letter inside an oval (the A B C D labels)
+                is NOT a fill. A slight shading from the printer is
+                NOT a fill. A shadow is NOT a fill. Only a student's
+                deliberate pencil/pen mark counts as a fill.
+
+                ONLY COMMIT TO A LETTER WHEN THE FILL IS OBVIOUS.
+                A wrong letter is worse than a blank. If in doubt,
+                output blank.
 
                 If a row's fill is visible but you genuinely cannot
                 tell which of the four ovals it is in, output:
@@ -2231,6 +2278,7 @@ fun WaveUnitsApp() {
 
     var lastSeenPrintedName by remember { mutableStateOf<String?>(null) }
     var bubbleSheetMode by remember { mutableStateOf(prefs.getBoolean("bubbleSheetMode", false)) }
+    var expectedQuestionCount by remember { mutableStateOf(prefs.getString("expectedQuestionCount", "") ?: "") }
 
     var isEditingAnswerKey by remember { mutableStateOf(false) }
     var editableKeyText by remember { mutableStateOf("") }
@@ -3375,6 +3423,21 @@ fun WaveUnitsApp() {
                                     transcribeBubbleSheet(context, uri)
                                 } else {
                                     transcribeAnswerSheet(context, uri)
+                                }
+                                // If the teacher set a last-question number, drop
+                                // any hallucinated rows past it.
+                                val maxQ = expectedQuestionCount.toIntOrNull()
+                                if (maxQ != null && maxQ > 0 && useBubbleMode) {
+                                    val body = if (printout.contains("---SHEET---")) printout.substringAfter("---SHEET---") else printout
+                                    val header = if (printout.contains("---SHEET---")) printout.substringBefore("---SHEET---") + "---SHEET---\n" else ""
+                                    val kept = body.lines().filter { line ->
+                                        val t = line.trim()
+                                        if (t.isEmpty()) return@filter false
+                                        val m = Regex("""^(\d+)\s*\|""").find(t) ?: return@filter true
+                                        val n = m.groupValues[1].toIntOrNull()
+                                        n == null || n <= maxQ
+                                    }
+                                    printout = header + kept.joinToString("\n")
                                 }
                                 val imgB64 = imageToBase64(context, uri)
                                 val printedName = extractPrintedStudentName(printout)
@@ -5262,6 +5325,23 @@ fun WaveUnitsApp() {
                                                         Spacer(modifier = Modifier.height(6.dp))
                                                         Text("Tip: flat sheet, no shadow across the ovals, dark pencil or pen. Faint shading may be misread.",
                                                             color = Color(0xFFef4444), fontSize = 11.sp)
+
+                                                        Spacer(modifier = Modifier.height(10.dp))
+                                                        Text("Last question number on the paper", fontWeight = FontWeight.Bold, color = Color(0xFF60a5fa), fontSize = 13.sp)
+                                                        Text("Type the number of the LAST question on the exam paper. The app will not read any rows past this number.",
+                                                            color = Color(0xFF94a3b8), fontSize = 11.sp)
+                                                        Spacer(modifier = Modifier.height(6.dp))
+                                                        OutlinedTextField(
+                                                            value = expectedQuestionCount,
+                                                            onValueChange = { v ->
+                                                                val filtered = v.filter { it.isDigit() }.take(3)
+                                                                expectedQuestionCount = filtered
+                                                                prefs.edit().putString("expectedQuestionCount", filtered).apply()
+                                                            },
+                                                            label = { Text("e.g. 30") },
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            singleLine = true
+                                                        )
                                                     }
                                                 }
                                             }
